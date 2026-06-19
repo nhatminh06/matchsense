@@ -182,3 +182,4 @@ func pickTeamAndPlayer(homeTeam, awayTeam string) (string, string) {
 	return awayTeam, awayPlayers[rand.Intn(len(awayPlayers))]
 }
 // trigger build
+// trigger build
