@@ -101,5 +101,9 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "deploy: ml-predictor digest ${DIGEST:0:16}"
-            git push
+            for i in 1 2 3 4 5; do
+              git pull --rebase origin main && git push && break
+              echo "Push failed, retrying in 5s... (attempt $i)"
+              sleep 5
+            done
           fi

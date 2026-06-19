@@ -93,7 +93,7 @@ jobs:
       - name: Update GitOps manifest with digest
         run: |
           DIGEST="${{ steps.push.outputs.digest }}"
-          sed -i "s|image: ghcr.io/.*/event-processor[:@].*|image: ghcr.io/${{ github.repository_owner }}/event-processor@${DIGEST}|" gitops/apps/event-processor/base/deployment.yaml
+          sed -i "s|image: ghcr.io/.*/event-processor[:@].*|image: ghcr.io/${{ github.repository_owner }}/event-api@${DIGEST}|" gitops/apps/event-api/base/deployment.yaml
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add gitops/apps/event-processor/base/deployment.yaml
@@ -101,5 +101,9 @@ jobs:
             echo "No changes to commit"
           else
             git commit -m "deploy: event-processor digest ${DIGEST:0:16}"
-            git push
+            for i in 1 2 3 4 5; do
+              git pull --rebase origin main && git push && break
+              echo "Push failed, retrying in 5s... (attempt $i)"
+              sleep 5
+            done
           fi
