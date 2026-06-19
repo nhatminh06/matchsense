@@ -18,7 +18,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: ml-predictor
-          image: ghcr.io/nhatminh06/ml-predictor@sha256:8510108f54e7a6f54f371ee76f8724b6a45eafff9c6e8552e483595e2507d01a
+          image: ghcr.io/nhatminh06/ml-predictor@sha256:dc614187c878044d4d9ce79bd81c6d85a2be3441bdf779624d3b847e60071705
           ports:
             - containerPort: 8084
           env:
