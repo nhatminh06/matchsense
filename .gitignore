@@ -2,8 +2,7 @@
 venv/
 __pycache__/
 *.pyc
-bin/
-event-api
-event-processor
-query-api
-match-simulator
+services/event-api/event-api
+services/event-processor/event-processor
+services/query-api/query-api
+services/match-simulator/match-simulator
