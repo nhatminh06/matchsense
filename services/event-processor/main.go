@@ -289,3 +289,4 @@ func processEvent(parentCtx context.Context, event MatchEvent) {
 		event.MatchID, event.Minute, event.EventType, event.Player,
 		matchStats.HomeTeam, matchStats.HomeGoals, matchStats.AwayGoals, matchStats.AwayTeam)
 }
+// trigger build
