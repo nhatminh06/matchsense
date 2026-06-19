@@ -1,0 +1,9 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+bin/
+event-api
+event-processor
+query-api
+match-simulator

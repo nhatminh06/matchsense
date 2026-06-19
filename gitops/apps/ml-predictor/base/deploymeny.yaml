@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-predictor
+  namespace: matchsense
+  labels:
+    app: ml-predictor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ml-predictor
+  template:
+    metadata:
+      labels:
+        app: ml-predictor
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: ml-predictor
+          image: ghcr.io/nhatminh06/ml-predictor:latest
+          ports:
+            - containerPort: 8084
+          env:
+            - name: KAFKA_BROKER
+              value: "kafka:29092"
+            - name: REDIS_URL
+              value: "redis:6379"
+            - name: MODEL_DIR
+              value: "/app/models"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://jaeger:4318"
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "300m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8084
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8084
+            initialDelaySeconds: 5
+            periodSeconds: 10
