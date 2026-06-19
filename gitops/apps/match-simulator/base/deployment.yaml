@@ -1,0 +1,39 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: match-simulator
+  namespace: matchsense
+  labels:
+    app: match-simulator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: match-simulator
+  template:
+    metadata:
+      labels:
+        app: match-simulator
+    spec:
+      enableServiceLinks: false
+      containers:
+        - name: match-simulator
+          image: ghcr.io/nhatminh06/match-simulator:latest
+          env:
+            - name: EVENT_API_URL
+              value: "http://event-api:8080"
+            - name: MATCH_ID
+              value: "ars-mci-2026"
+            - name: HOME_TEAM
+              value: "Arsenal"
+            - name: AWAY_TEAM
+              value: "Manchester City"
+            - name: SPEED
+              value: "2"
+          resources:
+            requests:
+              memory: "16Mi"
+              cpu: "25m"
+            limits:
+              memory: "32Mi"
+              cpu: "50m"
