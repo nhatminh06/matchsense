@@ -1,0 +1,31 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: verify-signed-images
+  annotations:
+    policies.kyverno.io/title: Verify Cosign Image Signatures
+    policies.kyverno.io/description: >-
+      Verifies that all images from GHCR are signed by
+      the project GitHub Actions CI using Cosign keyless signing.
+spec:
+  validationFailureAction: Audit
+  webhookTimeoutSeconds: 30
+  rules:
+    - name: verify-ghcr-images
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/nhatminh06/*"
+          mutateDigest: false
+          verifyDigest: false
+          attestors:
+            - entries:
+                - keyless:
+                    subject: "https://github.com/nhatminh06/*"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: "https://rekor.sigstore.dev"
