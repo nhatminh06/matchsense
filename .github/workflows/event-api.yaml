@@ -1,0 +1,105 @@
+name: event-api CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'services/event-api/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'services/event-api/**'
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/event-api
+
+jobs:
+  gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz
+          sudo mv gitleaks /usr/local/bin/
+      - name: Run Gitleaks
+        run: gitleaks detect --source . --verbose
+
+  build-and-deploy:
+    needs: gitleaks
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image locally
+        uses: docker/build-push-action@v5
+        with:
+          context: ./services/event-api
+          push: false
+          load: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          format: table
+          exit-code: 1
+          severity: CRITICAL
+          ignore-unfixed: true
+
+      - name: Generate SBOM
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.IMAGE }}:${{ github.sha }}
+          format: cyclonedx
+          output: sbom.cdx.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-event-api
+          path: sbom.cdx.json
+          retention-days: 90
+
+      - name: Push image to GHCR
+        id: push
+        run: |
+          docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:latest
+          docker push ${{ env.IMAGE }}:${{ github.sha }}
+          docker push ${{ env.IMAGE }}:latest
+          DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' ${{ env.IMAGE }}:${{ github.sha }})
+          DIGEST_HASH=$(echo "$DIGEST" | cut -d'@' -f2)
+          echo "digest=$DIGEST_HASH" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign image with Cosign
+        run: cosign sign --yes ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
+
+      - name: Update GitOps manifest with digest
+        run: |
+          DIGEST="${{ steps.push.outputs.digest }}"
+          sed -i "s|image: ghcr.io/.*/event-api[:@].*|image: ghcr.io/${{ github.repository_owner }}/event-api@${DIGEST}|" gitops/apps/event-api/base/deployment.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add gitops/apps/event-api/base/deployment.yaml
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "deploy: event-api digest ${DIGEST:0:16}"
+            git push
+          fi
