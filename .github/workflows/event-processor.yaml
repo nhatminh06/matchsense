@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - 'services/event-processor/**'
+  workflow_dispatch: {}
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/event-processor
