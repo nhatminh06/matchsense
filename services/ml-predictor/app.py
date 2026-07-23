@@ -3,6 +3,7 @@ import os
 import threading
 import logging
 import time
+from contextlib import asynccontextmanager
 
 import joblib
 import numpy as np
@@ -36,11 +37,13 @@ tracer = trace.get_tracer("ml-predictor")
 # Prometheus metrics
 predictions_total = Counter("ml_predictor_predictions_total", "Total predictions", ["model_type"])
 prediction_latency = Histogram("ml_predictor_prediction_duration_seconds", "Prediction latency", ["model_type"])
-xg_value = Gauge("ml_predictor_last_xg", "Last xG prediction", ["match_id"])
-home_win_prob = Gauge("ml_predictor_home_win_prob", "Home win probability", ["match_id"])
+# NOTE: not labeled by match_id — that would add a permanent, unbounded
+# Prometheus series per match ever played. Per-match values are already
+# available via query-api/Redis; these gauges just track the latest
+# value system-wide.
+xg_value = Gauge("ml_predictor_last_xg", "Last xG prediction across all matches")
+home_win_prob = Gauge("ml_predictor_home_win_prob", "Latest home win probability across all matches")
 kafka_messages_processed = Counter("ml_predictor_kafka_messages_total", "Kafka messages processed")
-
-app = FastAPI(title="ml-predictor")
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
 REDIS_URL = os.getenv("REDIS_URL", "localhost:6379")
@@ -199,7 +202,7 @@ def kafka_consumer_loop():
                             if xg is not None:
                                 predictions["last_shot_xg"] = xg
                                 predictions_total.labels(model_type="xg").inc()
-                                xg_value.labels(match_id=match_id).set(xg)
+                                xg_value.set(xg)
                                 logger.info(f"[{match_id}] min:{stats.get('minute')} xG={xg:.3f} ({last_event.get('player')})")
 
                                 try:
@@ -234,7 +237,7 @@ def kafka_consumer_loop():
                         if win_prob:
                             predictions["win_probability"] = win_prob
                             predictions_total.labels(model_type="win_prob").inc()
-                            home_win_prob.labels(match_id=match_id).set(win_prob.get("home_win", 0))
+                            home_win_prob.set(win_prob.get("home_win", 0))
                             logger.info(
                                 f"[{match_id}] min:{stats.get('minute')} "
                                 f"Win%: H={win_prob.get('home_win', 0):.1%} "
@@ -254,11 +257,15 @@ def kafka_consumer_loop():
                 logger.error(f"Error processing message: {e}")
 
 
-@app.on_event("startup")
-def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     thread = threading.Thread(target=kafka_consumer_loop, daemon=True)
     thread.start()
     logger.info("Kafka consumer thread started")
+    yield
+
+
+app = FastAPI(title="ml-predictor", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -284,6 +291,4 @@ def metrics():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8084)# trigger build
-# trigger build
-# trigger build
+    uvicorn.run(app, host="0.0.0.0", port=8084)

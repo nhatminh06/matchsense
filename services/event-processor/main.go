@@ -126,6 +126,41 @@ func (c kafkaHeaderCarrier) Keys() []string {
 	return keys
 }
 
+// loadActiveMatchesFromRedis rehydrates the in-memory stats map from the
+// last snapshot each active match had in Redis. Without this, a restart of
+// this service mid-match would silently reset every running match's score,
+// shots, cards, etc. back to zero even though Kafka would resume consuming
+// from the correct offset.
+func loadActiveMatchesFromRedis() {
+	matchIDs, err := rdb.SMembers(ctx, "matches:active").Result()
+	if err != nil {
+		log.Printf("WARNING: could not load active matches from Redis: %v", err)
+		return
+	}
+
+	restored := 0
+	for _, id := range matchIDs {
+		data, err := rdb.Get(ctx, fmt.Sprintf("match:%s:stats", id)).Result()
+		if err != nil {
+			log.Printf("WARNING: could not load stats for match %s: %v", id, err)
+			continue
+		}
+
+		var matchStats MatchStats
+		if err := json.Unmarshal([]byte(data), &matchStats); err != nil {
+			log.Printf("WARNING: could not parse stats for match %s: %v", id, err)
+			continue
+		}
+
+		stats[id] = &matchStats
+		restored++
+	}
+
+	if restored > 0 {
+		log.Printf("Restored in-memory state for %d active match(es) from Redis", restored)
+	}
+}
+
 func main() {
 	shutdown := initTracer()
 	defer shutdown()
@@ -138,6 +173,7 @@ func main() {
 		log.Printf("WARNING: Redis not available: %v", err)
 	} else {
 		log.Println("Connected to Redis")
+		loadActiveMatchesFromRedis()
 	}
 
 	reader := kafka.NewReader(kafka.ReaderConfig{
@@ -289,5 +325,3 @@ func processEvent(parentCtx context.Context, event MatchEvent) {
 		event.MatchID, event.Minute, event.EventType, event.Player,
 		matchStats.HomeTeam, matchStats.HomeGoals, matchStats.AwayGoals, matchStats.AwayTeam)
 }
-// trigger build
-// trigger build

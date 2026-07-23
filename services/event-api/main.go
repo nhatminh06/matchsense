@@ -37,9 +37,13 @@ var (
 	writer *kafka.Writer
 	tracer = otel.Tracer("event-api")
 
+	// NOTE: intentionally labeled only by event_type, not match_id.
+	// match_id is unbounded over the lifetime of the service (a new
+	// label value per match forever), which would blow up Prometheus
+	// cardinality. Per-match detail belongs in logs/traces, not metrics.
 	eventsReceived = prometheus.NewCounterVec(
 		prometheus.CounterOpts{Name: "event_api_events_received_total", Help: "Total events received by type"},
-		[]string{"event_type", "match_id"},
+		[]string{"event_type"},
 	)
 	eventsPublished = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "event_api_events_published_total", Help: "Total events published to Kafka"},
@@ -188,7 +192,7 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 		attribute.Int("event.minute", event.Minute),
 	)
 
-	eventsReceived.WithLabelValues(event.EventType, event.MatchID).Inc()
+	eventsReceived.WithLabelValues(event.EventType).Inc()
 
 	data, _ := json.Marshal(event)
 
@@ -224,9 +228,3 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
 }
-// trigger build
-// trigger build
-// trigger build
-// trigger build
-// trigger build
-// trigger build
