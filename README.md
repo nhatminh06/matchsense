@@ -5,16 +5,7 @@ ingested, aggregated into running stats, and fed into ML models for
 expected-goals (xG) and win-probability predictions.
 
 ## Architecture
-
-```
-match-simulator --> event-api --> Kafka(match-events) --> event-processor --> Redis
-                                                                |
-                                                                v
-                                                     Kafka(match-stats) --> ml-predictor --> Redis
-                                                                                                |
-                                                                                                v
-                                                                                          query-api
-```
+![MatchSense: Live Match Analytics Platform Architecture](architecture.png)
 
 - **event-api** (Go) — HTTP ingestion endpoint, publishes events to Kafka
 - **event-processor** (Go) — consumes events, maintains running match stats in Redis
