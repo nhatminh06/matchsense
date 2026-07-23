@@ -18,7 +18,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: event-processor
-          image: ghcr.io/nhatminh06/event-processor:latest
+          image: ghcr.io/nhatminh06/event-processor@sha256:1cebfbbd3910e38dedc9cc55f77542859653d21d857ce140d623e21cdac3a15b
           env:
             - name: KAFKA_BROKER
               value: "kafka:29092"
