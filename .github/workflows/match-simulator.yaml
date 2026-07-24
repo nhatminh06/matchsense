@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - 'services/match-simulator/**'
+  workflow_dispatch: {}
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/match-simulator
@@ -29,7 +30,7 @@ jobs:
 
   build-and-deploy:
     needs: gitleaks
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: write
