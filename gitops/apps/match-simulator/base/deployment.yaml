@@ -19,6 +19,8 @@ spec:
       containers:
         - name: match-simulator
           image: ghcr.io/nhatminh06/match-simulator@sha256:163c5587b00807e113a32868ef0ea459e013fab978218814c16475ee7e52d516
+          ports:
+            - containerPort: 8082
           env:
             - name: EVENT_API_URL
               value: "http://event-api:8080"
@@ -30,6 +32,8 @@ spec:
               value: "Manchester City"
             - name: SPEED
               value: "2"
+            - name: HEALTH_PORT
+              value: "8082"
           resources:
             requests:
               memory: "16Mi"
@@ -37,3 +41,15 @@ spec:
             limits:
               memory: "32Mi"
               cpu: "50m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8082
+            initialDelaySeconds: 3
+            periodSeconds: 5
