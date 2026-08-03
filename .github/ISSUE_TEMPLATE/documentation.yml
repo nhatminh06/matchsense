@@ -1,0 +1,23 @@
+name: Documentation
+description: Report missing, unclear, or incorrect documentation
+labels: ["documentation"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: File or section (e.g. README.md, docs/deployment.md)
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's wrong or missing?
+    validations:
+      required: true
+
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested fix

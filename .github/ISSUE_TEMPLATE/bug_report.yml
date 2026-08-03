@@ -1,0 +1,76 @@
+name: Bug report
+description: Report something that isn't working as expected
+labels: ["bug"]
+body:
+  - type: dropdown
+    id: service
+    attributes:
+      label: Affected service
+      options:
+        - event-api
+        - event-processor
+        - query-api
+        - match-simulator
+        - ml-predictor
+        - observability (Prometheus/Grafana/Loki/Jaeger)
+        - gitops / deployment
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Local (docker compose)
+        - Kubernetes (via GitOps)
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      description: Exact steps to reproduce the issue.
+      placeholder: |
+        1. Run `docker compose up --build`
+        2. curl ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: >
+        Paste relevant log output. **Do not include secrets, tokens, or credentials** —
+        redact anything sensitive before pasting.
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: Version / commit
+      description: Git commit SHA or image digest, if known.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
