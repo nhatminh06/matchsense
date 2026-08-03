@@ -1,0 +1,40 @@
+name: PR title check
+
+# Validates the PR title against Conventional Commits, since squash merges
+# use the PR title as the final commit title on main.
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+concurrency:
+  group: pr-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Validate title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # pull_request_target runs with base-branch permissions even for
+      # forked-PR titles, but this job only reads PR metadata (title) via
+      # the Action below — it never checks out or executes contributor
+      # code, so it's safe to use here.
+      - uses: amannn/action-semantic-pull-request@48f256284bd46cdaab1048c3721360e808335d50 # v6.1.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: |
+            feat
+            fix
+            docs
+            test
+            refactor
+            perf
+            build
+            ci
+            chore
+            revert

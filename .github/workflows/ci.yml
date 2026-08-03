@@ -1,0 +1,206 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Least-privilege default; individual jobs don't need anything beyond
+# reading the checked-out code.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go-checks:
+    name: Go checks (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [event-api, event-processor, query-api, match-simulator]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: services/${{ matrix.service }}/go.mod
+          cache-dependency-path: services/${{ matrix.service }}/go.sum
+
+      - name: gofmt check
+        working-directory: services/${{ matrix.service }}
+        run: |
+          fmt_out=$(gofmt -l .)
+          if [ -n "$fmt_out" ]; then
+            echo "The following files are not gofmt-formatted:"
+            echo "$fmt_out"
+            exit 1
+          fi
+
+      - name: go vet
+        working-directory: services/${{ matrix.service }}
+        run: go vet ./...
+
+      - name: go build
+        working-directory: services/${{ matrix.service }}
+        run: go build ./...
+
+      - name: go test (race detector)
+        working-directory: services/${{ matrix.service }}
+        # Most services have no test files yet; `go test` exits 0 with
+        # "[no test files]" in that case, so this is honest rather than a
+        # fake pass — it starts enforcing real coverage the moment tests
+        # are added.
+        run: go test -race ./...
+
+  python-checks:
+    name: Python checks (ml-predictor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: services/ml-predictor/requirements.txt
+
+      - name: Install dependencies
+        working-directory: services/ml-predictor
+        run: pip install -r requirements.txt ruff
+
+      - name: Lint (ruff, pyflakes rules)
+        working-directory: services/ml-predictor
+        # Scoped to F (pyflakes: unused imports, undefined names, etc.)
+        # rather than full style/formatting, since the codebase isn't
+        # ruff-formatted yet and a repo-wide reformat is out of scope here.
+        run: ruff check --select F .
+
+      - name: Compile check
+        working-directory: services/ml-predictor
+        run: python -m compileall .
+
+      - name: Run tests
+        working-directory: services/ml-predictor
+        # No test files exist yet for ml-predictor. This step is wired in
+        # so it starts running the moment test_*.py files are added,
+        # instead of silently doing nothing forever.
+        run: |
+          if compgen -G "test_*.py" > /dev/null || compgen -G "*_test.py" > /dev/null; then
+            pip install pytest
+            pytest -v
+          else
+            echo "No test files found for ml-predictor yet — skipping pytest."
+          fi
+
+  markdown-lint:
+    name: Markdown lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
+        with:
+          globs: "**/*.md"
+
+  yaml-lint:
+    name: YAML lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install yamllint
+        run: pip install yamllint==1.35.1
+      - name: Run yamllint
+        run: |
+          cat > /tmp/yamllint.yml <<'EOF'
+          extends: default
+          rules:
+            line-length: disable
+            document-start: disable
+            truthy: disable
+            braces:
+              max-spaces-inside: 1
+          EOF
+          yamllint -c /tmp/yamllint.yml .
+
+  actionlint:
+    name: GitHub Actions workflow lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download actionlint
+        run: |
+          curl -sSL "https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash" | bash -s -- 1.7.12
+      - name: Run actionlint
+        run: ./actionlint -color
+
+  dockerfile-lint:
+    name: Dockerfile lint (hadolint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [event-api, event-processor, query-api, match-simulator, ml-predictor]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download hadolint
+        run: |
+          curl -sSL -o /usr/local/bin/hadolint \
+            "https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-Linux-x86_64"
+          chmod +x /usr/local/bin/hadolint
+      - name: Run hadolint
+        # error-only: these Dockerfiles intentionally don't pin apk package
+        # versions (DL3018) so `apk add ca-certificates` keeps tracking
+        # whatever the pinned Alpine base image ships, instead of going
+        # stale and blocking routine Alpine base-image bumps.
+        run: hadolint --failure-threshold error services/${{ matrix.service }}/Dockerfile
+
+  compose-validate:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate docker-compose.yaml
+        run: docker compose config --quiet
+
+  kustomize-build:
+    name: Kustomize build (${{ matrix.service }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [event-api, event-processor, query-api, match-simulator, ml-predictor]
+    steps:
+      - uses: actions/checkout@v4
+      - name: kubectl kustomize
+        run: kubectl kustomize gitops/apps/${{ matrix.service }}/overlays/dev > /dev/null
+
+  gitleaks:
+    name: Secret scan (Gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install Gitleaks
+        run: |
+          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz
+          sudo mv gitleaks /usr/local/bin/
+      - name: Run Gitleaks
+        run: gitleaks detect --source . --verbose

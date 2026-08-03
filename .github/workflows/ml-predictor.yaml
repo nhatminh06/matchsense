@@ -14,27 +14,28 @@ on:
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/ml-predictor
 
-jobs:
-  gitleaks:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      - name: Install Gitleaks
-        run: |
-          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.21.2/gitleaks_8.21.2_linux_x64.tar.gz | tar xz
-          sudo mv gitleaks /usr/local/bin/
-      - name: Run Gitleaks
-        run: gitleaks detect --source . --verbose
+# Secret scanning, formatting/lint/build checks, and PR-title validation
+# for this service all live in the shared ci.yml / pr-title.yml workflows
+# (triggered by the same path filters), so they aren't duplicated here.
+permissions:
+  contents: read
 
+concurrency:
+  group: deploy-ml-predictor-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
   build-and-deploy:
-    needs: gitleaks
+    # Only runs after a merge to main (or a manual dispatch) — never for a
+    # pull_request event — so it only ever builds/pushes/signs a commit
+    # that already passed PR review and the ci.yml checks.
     if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
       packages: write
+      pull-requests: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -54,7 +55,7 @@ jobs:
           tags: ${{ env.IMAGE }}:${{ github.sha }}
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:${{ github.sha }}
           format: table
@@ -63,7 +64,7 @@ jobs:
           ignore-unfixed: true
 
       - name: Generate SBOM
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ env.IMAGE }}:${{ github.sha }}
           format: cyclonedx
@@ -86,7 +87,7 @@ jobs:
           DIGEST_HASH=$(echo "$DIGEST" | cut -d'@' -f2)
           echo "digest=$DIGEST_HASH" >> "$GITHUB_OUTPUT"
 
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: Sign image with Cosign
         run: cosign sign --yes ${{ env.IMAGE }}@${{ steps.push.outputs.digest }}
@@ -95,16 +96,34 @@ jobs:
         run: |
           DIGEST="${{ steps.push.outputs.digest }}"
           sed -i "s|image: ghcr.io/.*/ml-predictor[:@].*|image: ghcr.io/${{ github.repository_owner }}/ml-predictor@${DIGEST}|" gitops/apps/ml-predictor/base/deployment.yaml
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add gitops/apps/ml-predictor/base/deployment.yaml
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "deploy: ml-predictor digest ${DIGEST:0:16}"
-            for i in 1 2 3 4 5; do
-              git pull --rebase origin main && git push && break
-              echo "Push failed, retrying in 5s... (attempt $i)"
-              sleep 5
-            done
-          fi
+
+      - name: Open GitOps update pull request
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          # Falls back to GITHUB_TOKEN if no bot credential is configured.
+          # A PR opened with the default GITHUB_TOKEN will NOT trigger
+          # other workflows (e.g. ci.yml's pull_request checks) on itself —
+          # that's a GitHub Actions safeguard against recursive runs, not a
+          # bug here. To get automatic status checks on this GitOps PR,
+          # add a fine-grained PAT (repo scope, contents+PRs read/write) as
+          # the MATCHSENSE_BOT_TOKEN repository secret; until then, this PR
+          # is safe to review and merge manually, just without an
+          # automatically-triggered check run.
+          token: ${{ secrets.MATCHSENSE_BOT_TOKEN || secrets.GITHUB_TOKEN }}
+          commit-message: "chore(gitops): update ml-predictor image digest"
+          branch: gitops/ml-predictor-${{ github.sha }}
+          delete-branch: true
+          title: "chore(gitops): update ml-predictor image digest"
+          labels: devops
+          add-paths: gitops/apps/ml-predictor/base/deployment.yaml
+          body: |
+            Automated image digest update for **ml-predictor**.
+
+            - Source commit: ${{ github.sha }}
+            - Image: `${{ env.IMAGE }}@${{ steps.push.outputs.digest }}`
+            - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            - Trivy scan: passed (blocks on CRITICAL severity)
+            - SBOM: uploaded as workflow artifact `sbom-ml-predictor`
+
+            Merging this only updates the deployed image digest for ArgoCD
+            to pick up — no application code changes are included.

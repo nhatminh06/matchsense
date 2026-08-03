@@ -1,0 +1,11 @@
+# Default owner for anything not matched below
+*                           @nhatminh06
+
+/services/                 @nhatminh06
+/services/ml-predictor/    @nhatminh06
+/.github/                  @nhatminh06
+/gitops/                   @nhatminh06
+/observability/            @nhatminh06
+/ml/                       @nhatminh06
+*.md                       @nhatminh06
+/docs/                     @nhatminh06
