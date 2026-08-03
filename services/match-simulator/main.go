@@ -7,43 +7,39 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
-	"os"
 	"time"
+
+	"github.com/nhatminh06/matchsense/common"
 )
 
-type MatchEvent struct {
-	MatchID   string  `json:"match_id"`
-	Minute    int     `json:"minute"`
-	EventType string  `json:"event_type"`
-	Team      string  `json:"team"`
-	Player    string  `json:"player"`
-	X         float64 `json:"x"`
-	Y         float64 `json:"y"`
-	Detail    string  `json:"detail,omitempty"`
-	Timestamp string  `json:"timestamp"`
-}
+type MatchEvent = common.MatchEvent
 
 var (
 	homePlayers = []string{"Saka", "Rice", "Odegaard", "Havertz", "Saliba", "White", "Timber", "Raya", "Trossard", "Martinelli", "Gabriel"}
 	awayPlayers = []string{"Haaland", "De Bruyne", "Foden", "Rodri", "Stones", "Walker", "Gvardiol", "Ederson", "Grealish", "Silva", "Doku"}
 )
 
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
 func main() {
-	eventAPIURL := getEnv("EVENT_API_URL", "http://localhost:8080")
-	matchID := getEnv("MATCH_ID", fmt.Sprintf("match_%d", time.Now().Unix()))
-	homeTeam := getEnv("HOME_TEAM", "Arsenal")
-	awayTeam := getEnv("AWAY_TEAM", "Manchester City")
-	speedStr := getEnv("SPEED", "2") // seconds per minute of match time
+	eventAPIURL := common.GetEnv("EVENT_API_URL", "http://localhost:8080")
+	matchID := common.GetEnv("MATCH_ID", fmt.Sprintf("match_%d", time.Now().Unix()))
+	homeTeam := common.GetEnv("HOME_TEAM", "Arsenal")
+	awayTeam := common.GetEnv("AWAY_TEAM", "Manchester City")
+	speedStr := common.GetEnv("SPEED", "2") // seconds per minute of match time
+	healthPort := common.GetEnv("HEALTH_PORT", "8082")
 
 	speed := 2
 	fmt.Sscanf(speedStr, "%d", &speed)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "match-simulator"})
+	})
+	go func() {
+		if err := http.ListenAndServe(":"+healthPort, mux); err != nil {
+			log.Printf("WARNING: health server stopped: %v", err)
+		}
+	}()
 
 	log.Printf("Simulating: %s vs %s (match: %s)", homeTeam, awayTeam, matchID)
 	log.Printf("Speed: 1 match-minute = %d real-seconds", speed)
@@ -55,7 +51,11 @@ func main() {
 		events := generateMinuteEvents(matchID, minute, homeTeam, awayTeam)
 
 		for _, event := range events {
-			data, _ := json.Marshal(event)
+			data, err := json.Marshal(event)
+			if err != nil {
+				log.Printf("ERROR marshaling event: %v", err)
+				continue
+			}
 			resp, err := client.Post(eventAPIURL+"/events", "application/json", bytes.NewBuffer(data))
 			if err != nil {
 				log.Printf("ERROR sending event: %v", err)
