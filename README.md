@@ -1,41 +1,134 @@
-# matchsense
+# MatchSense
 
-Real-time football (soccer) match analytics pipeline: live match events are
-ingested, aggregated into running stats, and fed into ML models for
-expected-goals (xG) and win-probability predictions.
+Real-time football (soccer) match analytics: live match events are ingested,
+aggregated into running stats, and fed into ML models that produce
+expected-goals (xG) and win-probability predictions — end to end, from a raw
+kickoff event to a live Grafana dashboard.
 
-## Architecture
-![MatchSense: Live Match Analytics Platform Architecture](architecture.png)
+[![event-api CI](https://github.com/nhatminh06/matchsense/actions/workflows/event-api.yaml/badge.svg)](https://github.com/nhatminh06/matchsense/actions/workflows/event-api.yaml)
+[![CI](https://github.com/nhatminh06/matchsense/actions/workflows/ci.yml/badge.svg)](https://github.com/nhatminh06/matchsense/actions/workflows/ci.yml)
+![Go](https://img.shields.io/badge/Go-1.25-00ADD8?logo=go&logoColor=white)
+![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
 
-- **event-api** (Go) — HTTP ingestion endpoint, publishes events to Kafka
-- **event-processor** (Go) — consumes events, maintains running match stats in Redis
-- **ml-predictor** (Python/FastAPI) — consumes stats, produces xG and win-probability predictions
-- **query-api** (Go) — read API for match stats and predictions
-- **match-simulator** (Go) — generates a simulated match for local testing
+![MatchSense architecture](architecture.png)
 
-Observability: Prometheus, Grafana, Loki/Promtail, Jaeger.
-Deployment: Kubernetes manifests + Kustomize overlays under `gitops/`, with
-ArgoCD app definitions and Kyverno policies.
+## What MatchSense does
 
-## Running locally
+A simulated match (or a real event feed, if one were wired in) emits events —
+goals, shots, fouls, corners, cards — which flow through Kafka into a stats
+aggregator, then into an ML prediction service, and out through a read API
+and a live Grafana dashboard. The whole path — ingestion, aggregation,
+prediction, querying, and observability — is real and running, not mocked.
+
+## Key features
+
+- Real-time event ingestion and stats aggregation over Kafka
+- Live xG (expected goals) and win-probability predictions via scikit-learn
+  models served from FastAPI
+- Full observability: Prometheus metrics, Grafana dashboards, Loki logs,
+  Jaeger distributed tracing — wired together with real trace propagation
+  across HTTP → Kafka → consumers → Redis
+- Kubernetes deployment via Kustomize + ArgoCD (GitOps), with Kyverno
+  admission policies enforcing signed images, resource limits, and no
+  privileged containers
+- Supply-chain security on every image: secret scanning, Trivy CVE
+  scanning, SBOM generation, and Cosign keyless signing
+
+## System architecture
+
+| Service | Language | Responsibility | Reads from | Writes to |
+|---|---|---|---|---|
+| `event-api` | Go | HTTP ingestion endpoint for match events | HTTP `POST /events` | Kafka topic `match-events` |
+| `event-processor` | Go | Aggregates events into running match stats | Kafka `match-events` | Redis (`match:*:stats`), Kafka topic `match-stats` |
+| `ml-predictor` | Python / FastAPI | Produces xG and win-probability predictions | Kafka `match-stats` | Redis (`match:*:predictions`) |
+| `query-api` | Go | Read API for stats and predictions | Redis | HTTP responses |
+| `match-simulator` | Go | Generates a simulated match for local/demo use | — | HTTP `POST` to `event-api` |
+
+## Event and data flow
+
+```text
+match-simulator ──HTTP──▶ event-api ──Kafka(match-events)──▶ event-processor
+                                                                     │
+                                                    Redis(match:*:stats)
+                                                                     │
+                                                       Kafka(match-stats)
+                                                                     ▼
+                                                              ml-predictor
+                                                                     │
+                                                  Redis(match:*:predictions)
+                                                                     ▼
+                                                              query-api ──▶ clients / Grafana
+```
+
+Every hop propagates an OpenTelemetry trace context (via Kafka headers), so a
+single match event can be followed end to end in Jaeger.
+
+## Technology stack
+
+Go 1.25 · Python 3.11 / FastAPI · scikit-learn · Kafka · Redis · Prometheus ·
+Grafana · Loki/Promtail · Jaeger · Docker Compose · Kubernetes · Kustomize ·
+ArgoCD · Kyverno · Trivy · Cosign
+
+## Local quick start
+
+**Prerequisites:** Docker and Docker Compose.
 
 ```bash
+git clone https://github.com/nhatminh06/matchsense.git
+cd matchsense
 docker compose up --build
 ```
 
-Then:
-- `curl http://localhost:8083/matches` — list active matches
-- `curl http://localhost:8083/matches/ars-mci-2026` — match stats
-- `curl http://localhost:8083/matches/ars-mci-2026/predictions` — latest predictions
-- Grafana: http://localhost:3000 (admin / matchsense by default — override with `GRAFANA_ADMIN_PASSWORD`)
-- Prometheus: http://localhost:9090
-- Jaeger UI: http://localhost:16686
-
 The `match-simulator` service starts generating a simulated Arsenal vs.
-Manchester City match automatically. The "MatchSense - Live Match" dashboard
-in Grafana is auto-provisioned on startup.
+Manchester City match automatically.
 
-## ML models
+## Configuration
+
+Services are configured entirely through environment variables (see
+`docker-compose.yaml` for the full local set); there is no separate config
+file. Notable ones:
+
+| Variable | Default (local) | Purpose |
+|---|---|---|
+| `KAFKA_BROKER` | `kafka:29092` | Kafka bootstrap address |
+| `REDIS_URL` | `redis:6379` | Redis address |
+| `GRAFANA_ADMIN_PASSWORD` | `matchsense` | Grafana admin password |
+
+> The `matchsense` default Grafana password is a **local-development
+> convenience only** — it is not safe for any environment reachable outside
+> your machine. Kubernetes deployments should override it via a real secret.
+
+## API examples
+
+```bash
+curl http://localhost:8083/matches
+curl http://localhost:8083/matches/ars-mci-2026
+curl http://localhost:8083/matches/ars-mci-2026/predictions
+curl -X POST http://localhost:8080/events \
+  -H 'Content-Type: application/json' \
+  -d '{"match_id":"demo-1","event_type":"shot","team":"Arsenal","player":"Saka","minute":12,"x":88,"y":45,"detail":"on_target"}'
+```
+
+## Testing
+
+Most services don't have automated tests yet — CI currently enforces
+`gofmt`/`go vet`/`go build` (and `go test`, which will start actually
+asserting things once tests are added) for the Go services, and a
+lint/compile check for `ml-predictor`. See [CONTRIBUTING.md](CONTRIBUTING.md)
+for how to run these locally, and [docs/local-development.md](docs/local-development.md#test-coverage-status)
+for the current coverage gaps.
+
+## Observability
+
+- **Grafana**: http://localhost:3000 — the "MatchSense - Live Match"
+  dashboard is auto-provisioned on startup
+- **Prometheus**: http://localhost:9090
+- **Jaeger**: http://localhost:16686
+
+See [docs/observability.md](docs/observability.md) for what's actually wired
+up (and what isn't — there's no alerting yet).
+
+## ML model workflow
 
 Pretrained models live in `ml/models/`. To regenerate training data and
 retrain:
@@ -49,11 +142,60 @@ python train_win_prob.py
 ```
 
 Retrained models need to be copied into `services/ml-predictor/models/`
-before rebuilding that service's image.
+before rebuilding that service's image. See
+[docs/ml-pipeline.md](docs/ml-pipeline.md) for details.
 
-## Deploying to Kubernetes
+## Kubernetes and GitOps deployment
 
-See `gitops/`. Each service's CI workflow (`.github/workflows/`) builds,
-scans (Trivy), signs (Cosign), and pushes images, then updates the
-corresponding `gitops/apps/*/base/deployment.yaml` with the new image
-digest for ArgoCD to pick up.
+Deployed via Kustomize manifests under `gitops/` and reconciled by ArgoCD.
+See [docs/deployment.md](docs/deployment.md) for the full build → scan →
+sign → GitOps-PR → ArgoCD flow, and the rollback procedure.
+
+## Security and software supply chain
+
+Every image is scanned (Trivy, blocking on CRITICAL), has an SBOM generated,
+and is signed with Cosign (keyless/OIDC) before Kyverno admission policies
+allow it into the cluster — see [docs/security.md](docs/security.md) and
+[SECURITY.md](SECURITY.md) for vulnerability reporting.
+
+## Repository structure
+
+```text
+services/        Go and Python service source + Dockerfiles
+gitops/           Kustomize bases/overlays, ArgoCD Application manifests, Kyverno policies
+observability/    Prometheus, Grafana, Loki, Promtail config
+ml/               Training data, training scripts, pretrained models
+docs/             Architecture, deployment, observability, security, ML docs
+.github/          CI workflows, issue/PR templates, Dependabot config
+```
+
+## Documentation
+
+- [docs/architecture.md](docs/architecture.md)
+- [docs/local-development.md](docs/local-development.md) (includes testing)
+- [docs/deployment.md](docs/deployment.md)
+- [docs/observability.md](docs/observability.md)
+- [docs/security.md](docs/security.md)
+- [docs/ml-pipeline.md](docs/ml-pipeline.md)
+- [docs/troubleshooting.md](docs/troubleshooting.md)
+
+## Roadmap
+
+- Add real test coverage for the stats-aggregation and prediction logic
+- Add Prometheus alerting rules (dashboards exist; alerts don't yet)
+- Ingest a real event feed instead of only the simulator
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, branch/commit
+conventions, and the PR workflow.
+
+## Security reporting
+
+See [SECURITY.md](SECURITY.md) — please don't open a public issue for a
+suspected vulnerability.
+
+## License
+
+No license has been chosen for this repository yet. Until one is added, all
+rights are reserved by default and this code is not licensed for reuse.
