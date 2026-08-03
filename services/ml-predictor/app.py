@@ -44,6 +44,7 @@ prediction_latency = Histogram("ml_predictor_prediction_duration_seconds", "Pred
 xg_value = Gauge("ml_predictor_last_xg", "Last xG prediction across all matches")
 home_win_prob = Gauge("ml_predictor_home_win_prob", "Latest home win probability across all matches")
 kafka_messages_processed = Counter("ml_predictor_kafka_messages_total", "Kafka messages processed")
+processing_errors = Counter("ml_predictor_processing_errors_total", "Errors while processing a Kafka message", ["stage"])
 
 KAFKA_BROKER = os.getenv("KAFKA_BROKER", "localhost:9092")
 REDIS_URL = os.getenv("REDIS_URL", "localhost:6379")
@@ -222,11 +223,13 @@ def kafka_consumer_loop():
 
                                     predictions["home_xg"] = round(home_xg, 3)
                                     predictions["away_xg"] = round(away_xg, 3)
-                                except Exception as e:
-                                    logger.error(f"Error accumulating xG: {e}")
+                                except Exception:
+                                    processing_errors.labels(stage="xg_accumulate").inc()
+                                    logger.exception("Error accumulating xG")
 
-                        except Exception as e:
-                            logger.error(f"Error in xG prediction: {e}")
+                        except Exception:
+                            processing_errors.labels(stage="xg_predict").inc()
+                            logger.exception("Error in xG prediction")
 
                 with tracer.start_as_current_span("predict-win-probability"):
                     try:
@@ -244,17 +247,20 @@ def kafka_consumer_loop():
                                 f"D={win_prob.get('draw', 0):.1%} "
                                 f"A={win_prob.get('away_win', 0):.1%}"
                             )
-                    except Exception as e:
-                        logger.error(f"Error in win prob prediction: {e}")
+                    except Exception:
+                        processing_errors.labels(stage="win_prob_predict").inc()
+                        logger.exception("Error in win prob prediction")
 
                 with tracer.start_as_current_span("redis-write-predictions"):
                     try:
                         rdb.set(f"match:{match_id}:predictions", json.dumps(predictions))
-                    except Exception as e:
-                        logger.error(f"Error storing predictions in Redis: {e}")
+                    except Exception:
+                        processing_errors.labels(stage="redis_write").inc()
+                        logger.exception("Error storing predictions in Redis")
 
-            except Exception as e:
-                logger.error(f"Error processing message: {e}")
+            except Exception:
+                processing_errors.labels(stage="message").inc()
+                logger.exception("Error processing message")
 
 
 @asynccontextmanager
