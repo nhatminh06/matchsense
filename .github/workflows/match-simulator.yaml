@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'services/match-simulator/**'
+      - 'services/common/**'
   pull_request:
     branches: [main]
     paths:
       - 'services/match-simulator/**'
+      - 'services/common/**'
   workflow_dispatch: {}
 
 env:
@@ -48,7 +50,8 @@ jobs:
       - name: Build image locally
         uses: docker/build-push-action@v5
         with:
-          context: ./services/match-simulator
+          context: .
+          file: services/match-simulator/Dockerfile
           push: false
           load: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}
