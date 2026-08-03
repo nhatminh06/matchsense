@@ -1,0 +1,15 @@
+{
+  // MD013 (line-length): prose lines are wrapped for readability, not a
+  // strict 80-column limit; tables and long URLs would otherwise fail.
+  "MD013": false,
+  // MD034 (bare URLs): plain http://localhost:PORT references are clearer
+  // as-is than as markdown links for local dev instructions.
+  "MD034": false,
+  // MD060 (table-column-style): overly strict pipe-alignment rule; GitHub
+  // renders these tables correctly regardless of alignment style.
+  "MD060": false,
+  // MD041 (first-line-heading): GitHub's PR/issue templates conventionally
+  // start with a `##` section heading, not a top-level title (GitHub
+  // supplies the title itself).
+  "MD041": false
+}
