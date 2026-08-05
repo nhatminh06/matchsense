@@ -210,7 +210,6 @@ docs/             Architecture, deployment, observability, security, ML docs
 - **Security controls demonstrate workflow patterns**, not a complete
   production security program — see [docs/security.md](docs/security.md)
   for exactly what's covered.
-- **No LICENSE file exists yet** — see [License](#license) below.
 
 ## Roadmap
 
@@ -222,7 +221,6 @@ docs/             Architecture, deployment, observability, security, ML docs
 - Add real model evaluation metrics for the xG/win-probability models
 - Add API authentication
 - Ingest a real event feed instead of only the simulator
-- Add a LICENSE (currently unset — see [License](#license))
 
 ## Contributing
 
@@ -236,5 +234,4 @@ suspected vulnerability.
 
 ## License
 
-No license has been chosen for this repository yet. Until one is added, all
-rights are reserved by default and this code is not licensed for reuse.
+Released under the [MIT License](LICENSE).
