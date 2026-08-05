@@ -2,7 +2,22 @@
 venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 services/event-api/event-api
 services/event-processor/event-processor
 services/query-api/query-api
 services/match-simulator/match-simulator
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
