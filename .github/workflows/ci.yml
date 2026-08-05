@@ -89,12 +89,13 @@ jobs:
 
       - name: Run tests
         working-directory: services/ml-predictor
-        # No test files exist yet for ml-predictor. This step is wired in
-        # so it starts running the moment test_*.py files are added,
-        # instead of silently doing nothing forever.
+        # Guarded rather than unconditional so this keeps working if a
+        # service ever ships with no tests again: it fails loudly only
+        # when test files exist and actually fail, not when there simply
+        # aren't any yet. httpx is required by fastapi.testclient.TestClient.
         run: |
           if compgen -G "test_*.py" > /dev/null || compgen -G "*_test.py" > /dev/null; then
-            pip install pytest
+            pip install pytest httpx
             pytest -v
           else
             echo "No test files found for ml-predictor yet — skipping pytest."
