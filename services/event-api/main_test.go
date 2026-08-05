@@ -7,9 +7,11 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
+	"github.com/nhatminh06/matchsense/common"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -160,5 +162,103 @@ func TestHealthHandler(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Fatalf("expected status=ok, got %+v", body)
+	}
+}
+
+// --- event_id behavior ---
+
+func TestEventsHandler_GeneratesEventIDWhenAbsent(t *testing.T) {
+	fp := &fakePublisher{}
+	pub = fp
+
+	rec := postEvent(t, `{"match_id":"m1","event_type":"goal"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rec.Code)
+	}
+
+	var published MatchEvent
+	if err := json.Unmarshal(fp.published[0].Value, &published); err != nil {
+		t.Fatalf("published message is not valid JSON: %v", err)
+	}
+	if published.EventID == "" {
+		t.Fatalf("expected an event_id to be generated when the client omitted one")
+	}
+	if err := common.ValidateEventID(published.EventID); err != nil {
+		t.Fatalf("generated event_id is not valid: %v", err)
+	}
+}
+
+func TestEventsHandler_GeneratedEventIDsAreUnique(t *testing.T) {
+	fp := &fakePublisher{}
+	pub = fp
+
+	const n = 50
+	for i := 0; i < n; i++ {
+		if rec := postEvent(t, `{"match_id":"m1","event_type":"shot"}`); rec.Code != http.StatusAccepted {
+			t.Fatalf("request %d: expected 202, got %d", i, rec.Code)
+		}
+	}
+
+	seen := make(map[string]bool, n)
+	for _, msg := range fp.published {
+		var e MatchEvent
+		if err := json.Unmarshal(msg.Value, &e); err != nil {
+			t.Fatalf("published message is not valid JSON: %v", err)
+		}
+		if seen[e.EventID] {
+			t.Fatalf("generated a duplicate event_id: %q", e.EventID)
+		}
+		seen[e.EventID] = true
+	}
+	if len(seen) != n {
+		t.Fatalf("expected %d distinct event IDs, got %d", n, len(seen))
+	}
+}
+
+func TestEventsHandler_PreservesClientSuppliedEventID(t *testing.T) {
+	fp := &fakePublisher{}
+	pub = fp
+
+	rec := postEvent(t, `{"event_id":"evt-client-123","match_id":"m1","event_type":"goal"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rec.Code)
+	}
+
+	var published MatchEvent
+	if err := json.Unmarshal(fp.published[0].Value, &published); err != nil {
+		t.Fatalf("published message is not valid JSON: %v", err)
+	}
+	// A client that supplies its own ID is relying on it surviving intact
+	// so that its retries deduplicate downstream.
+	if published.EventID != "evt-client-123" {
+		t.Fatalf("expected client-supplied event_id to be preserved, got %q", published.EventID)
+	}
+}
+
+func TestEventsHandler_RejectsMalformedEventID(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"contains colon", `{"event_id":"evt:123","match_id":"m1","event_type":"goal"}`},
+		{"contains whitespace", `{"event_id":"evt 123","match_id":"m1","event_type":"goal"}`},
+		{"contains newline", `{"event_id":"evt\n123","match_id":"m1","event_type":"goal"}`},
+		{"too long", `{"event_id":"` + strings.Repeat("a", common.MaxEventIDLength+1) + `","match_id":"m1","event_type":"goal"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := &fakePublisher{}
+			pub = fp
+
+			rec := postEvent(t, tc.body)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400 for a malformed event_id, got %d", rec.Code)
+			}
+			if len(fp.published) != 0 {
+				t.Fatalf("an event with a malformed event_id must not be published")
+			}
+		})
 	}
 }

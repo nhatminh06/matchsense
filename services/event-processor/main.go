@@ -24,9 +24,21 @@ import (
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
 type MatchEvent = common.MatchEvent
+
+// dedupeTTL bounds how long a processed event ID is remembered, and so how
+// late a redelivery can arrive and still be recognised as a duplicate. It
+// is set from DEDUPE_TTL at startup.
+//
+// Trade-off: every in-flight and recently-processed event holds one small
+// Redis key for this long, so the TTL trades memory against the width of
+// the deduplication window. The default is sized to comfortably exceed a
+// consumer restart plus Kafka rebalance, which is the realistic source of
+// redeliveries here — not to bound memory tightly.
+var dedupeTTL = 6 * time.Hour
 
 type MatchStats struct {
 	MatchID     string       `json:"match_id"`
@@ -58,6 +70,17 @@ type MatchStats struct {
 type statsStore interface {
 	SetStats(ctx context.Context, key string, data []byte) error
 	AddActiveMatch(ctx context.Context, matchID string) error
+
+	// ReserveEvent atomically claims an event ID for processing. See
+	// common.ReservationState for the meaning of each outcome.
+	ReserveEvent(ctx context.Context, eventID string, ttl time.Duration) (common.ReservationState, error)
+	// MarkProcessed records that an event has been folded into a match's
+	// statistics, so redeliveries within the TTL are skipped.
+	MarkProcessed(ctx context.Context, eventID string, ttl time.Duration) error
+	// ReleaseReservation drops a claim without marking the event
+	// processed, making a redelivery eligible for reprocessing. Used when
+	// an event is rejected before it reaches the aggregate.
+	ReleaseReservation(ctx context.Context, eventID string) error
 }
 
 // statsPublisher is the subset of the Kafka writer processEvent needs, for
@@ -74,6 +97,51 @@ func (s redisStatsStore) SetStats(ctx context.Context, key string, data []byte) 
 
 func (s redisStatsStore) AddActiveMatch(ctx context.Context, matchID string) error {
 	return s.client.SAdd(ctx, "matches:active", matchID).Err()
+}
+
+// Reservation state values stored in Redis.
+const (
+	reservationProcessing = "processing"
+	reservationProcessed  = "processed"
+)
+
+func (s redisStatsStore) ReserveEvent(ctx context.Context, eventID string, ttl time.Duration) (common.ReservationState, error) {
+	key := common.DedupeKey(eventID)
+
+	// SET NX is atomic, so exactly one consumer wins the claim even if
+	// several receive the same redelivery concurrently.
+	ok, err := s.client.SetNX(ctx, key, reservationProcessing, ttl).Result()
+	if err != nil {
+		return common.ReservationAcquired, err
+	}
+	if ok {
+		return common.ReservationAcquired, nil
+	}
+
+	// The key already existed: someone else either finished this event or
+	// is still working on it.
+	current, err := s.client.Get(ctx, key).Result()
+	if err == redis.Nil {
+		// The reservation expired between our SetNX and this Get. Treat
+		// it as in-flight rather than reprocessing on a guess; the next
+		// redelivery will get a clean claim.
+		return common.ReservationInFlight, nil
+	}
+	if err != nil {
+		return common.ReservationAcquired, err
+	}
+	if current == reservationProcessed {
+		return common.ReservationAlreadyProcessed, nil
+	}
+	return common.ReservationInFlight, nil
+}
+
+func (s redisStatsStore) MarkProcessed(ctx context.Context, eventID string, ttl time.Duration) error {
+	return s.client.Set(ctx, common.DedupeKey(eventID), reservationProcessed, ttl).Err()
+}
+
+func (s redisStatsStore) ReleaseReservation(ctx context.Context, eventID string) error {
+	return s.client.Del(ctx, common.DedupeKey(eventID)).Err()
 }
 
 type kafkaStatsPublisher struct{ writer *kafka.Writer }
@@ -101,13 +169,25 @@ var (
 	kafkaWriteErrors = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "event_processor_kafka_write_errors_total", Help: "Total errors publishing stats to Kafka"},
 	)
+	duplicateEvents = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "event_processor_duplicate_events_total", Help: "Redelivered events skipped by deduplication"},
+		[]string{"reason"},
+	)
+	eventsWithoutID = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "event_processor_events_without_id_total", Help: "Events consumed without an event_id, processed without deduplication"},
+	)
+	dedupeErrors = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "event_processor_dedupe_errors_total", Help: "Deduplication store errors, by operation"},
+		[]string{"operation"},
+	)
 	redisWriteErrors = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "event_processor_redis_write_errors_total", Help: "Total errors writing stats to Redis"},
 	)
 )
 
 func init() {
-	prometheus.MustRegister(eventsProcessed, kafkaReadErrors, kafkaWriteErrors, redisWriteErrors)
+	prometheus.MustRegister(eventsProcessed, kafkaReadErrors, kafkaWriteErrors, redisWriteErrors,
+		duplicateEvents, eventsWithoutID, dedupeErrors)
 }
 
 func initTracer() func() {
@@ -181,6 +261,16 @@ func main() {
 	kafkaBroker := common.GetEnv("KAFKA_BROKER", "localhost:9092")
 	redisAddr := common.GetEnv("REDIS_URL", "localhost:6379")
 	metricsPort := common.GetEnv("METRICS_PORT", "8081")
+
+	if raw := common.GetEnv("DEDUPE_TTL", ""); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 {
+			log.Printf("WARNING: invalid DEDUPE_TTL %q, keeping default %s", raw, dedupeTTL)
+		} else {
+			dedupeTTL = parsed
+		}
+	}
+	log.Printf("event deduplication window: %s", dedupeTTL)
 
 	rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
 	store = redisStatsStore{client: rdb}
@@ -345,15 +435,80 @@ func applyEvent(matchStats *MatchStats, event MatchEvent) (isHome bool) {
 	return isHome
 }
 
+// reserveForProcessing claims an event for this consumer and reports
+// whether processing should continue.
+//
+// Failure policy is deliberately fail-open: if the deduplication store is
+// unreachable we process the event anyway rather than dropping it. During
+// a Redis outage duplicate suppression is unavailable (a redelivery may be
+// double-counted), but no event is silently lost — the weaker of the two
+// failure modes, and the same outage already prevents the resulting stats
+// from being persisted at all.
+func reserveForProcessing(ctx context.Context, span trace.Span, event MatchEvent) bool {
+	if event.EventID == "" {
+		// Events published before event_id existed, or by a producer that
+		// does not set one. They cannot be deduplicated; process them so
+		// the pipeline stays backward compatible, but make it visible.
+		eventsWithoutID.Inc()
+		return true
+	}
+
+	state, err := store.ReserveEvent(ctx, event.EventID, dedupeTTL)
+	if err != nil {
+		dedupeErrors.WithLabelValues("reserve").Inc()
+		log.Printf("WARNING: dedupe reserve failed for event %s (processing anyway): %v", event.EventID, err)
+		return true
+	}
+
+	switch state {
+	case common.ReservationAcquired:
+		return true
+	case common.ReservationAlreadyProcessed, common.ReservationInFlight:
+		duplicateEvents.WithLabelValues(state.String()).Inc()
+		span.SetAttributes(attribute.Bool("event.duplicate", true))
+		log.Printf("[%s] event=%s skipped as duplicate (%s)", event.MatchID, event.EventID, state)
+		return false
+	default:
+		return true
+	}
+}
+
+// markProcessed records that an event has been folded into the aggregate.
+//
+// This is called immediately after the in-memory statistics are updated,
+// not after Redis/Kafka persistence, because "processed" means "counted in
+// the aggregate". Persistence failures are tracked by their own counters
+// and must not cause a redelivery to be counted a second time.
+func markProcessed(ctx context.Context, event MatchEvent) {
+	if event.EventID == "" {
+		return
+	}
+	if err := store.MarkProcessed(ctx, event.EventID, dedupeTTL); err != nil {
+		// The reservation stays in the "processing" state and expires
+		// with its TTL. A redelivery arriving after that point would be
+		// counted again; that window is bounded by dedupeTTL.
+		dedupeErrors.WithLabelValues("mark_processed").Inc()
+		log.Printf("WARNING: could not mark event %s processed: %v", event.EventID, err)
+	}
+}
+
 func processEvent(parentCtx context.Context, event MatchEvent) {
 	spanCtx, span := tracer.Start(parentCtx, "process-match-event")
 	defer span.End()
 
 	span.SetAttributes(
+		attribute.String("event.id", event.EventID),
 		attribute.String("match.id", event.MatchID),
 		attribute.String("event.type", event.EventType),
 		attribute.Int("event.minute", event.Minute),
 	)
+
+	// Deduplication gate. Kafka redelivers on consumer restart, so the
+	// same event can arrive more than once; without this check it would
+	// be counted twice. See common/dedupe.go for the state model.
+	if !reserveForProcessing(spanCtx, span, event) {
+		return
+	}
 
 	statsMu.Lock()
 
@@ -367,6 +522,11 @@ func processEvent(parentCtx context.Context, event MatchEvent) {
 
 	statsSnapshot := *matchStats
 	statsMu.Unlock()
+
+	// The event is now part of the aggregate, so it must never be applied
+	// again — mark it before the persistence steps below, whose failures
+	// are recoverable and tracked separately.
+	markProcessed(spanCtx, event)
 
 	eventsProcessed.Inc()
 

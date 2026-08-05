@@ -5,7 +5,9 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/nhatminh06/matchsense/common"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -95,11 +97,12 @@ func TestApplyEvent_EmptyTeamDoesNotCorruptHomeAwayDetection(t *testing.T) {
 	}
 }
 
-// TestApplyEvent_DuplicateEventIsCountedTwice documents the actual
-// delivery/dedup behavior of this pipeline: applyEvent has no concept of
-// event identity, so replaying the same event increments counters again.
-// This is a real, current gap (no idempotency), not a guarantee — see the
-// applyEvent doc comment.
+// TestApplyEvent_DuplicateEventIsCountedTwice pins down the deliberate
+// division of responsibility: applyEvent is the pure aggregation step and
+// has no concept of event identity, so calling it twice counts twice.
+// Deduplication lives one level up in processEvent, which gates on the
+// event ID before ever reaching applyEvent — see
+// TestProcessEvent_DuplicateEventIsNotDoubleCounted.
 func TestApplyEvent_DuplicateEventIsCountedTwice(t *testing.T) {
 	stats := newStats("m1")
 	goal := MatchEvent{MatchID: "m1", Team: "Arsenal", EventType: "goal", Minute: 10, Player: "Saka"}
@@ -129,12 +132,66 @@ func TestApplyEvent_OutOfOrderEventsOverwriteMinuteForward(t *testing.T) {
 
 // --- processEvent tests using fakes for statsStore / statsPublisher ---
 
+// fakeStatsStore is an in-memory stand-in for Redis. The reservation
+// methods model the same state machine as redisStatsStore (see
+// common/dedupe.go) so deduplication behaviour can be tested without a
+// real Redis instance.
 type fakeStatsStore struct {
 	mu        sync.Mutex
 	setCalls  int
 	saddCalls int
 	setErr    error
 	saddErr   error
+
+	reservations map[string]string // eventID -> "processing" | "processed"
+	reserveErr   error
+	markErr      error
+	reserveCalls int
+	markCalls    int
+	releaseCalls int
+}
+
+func (f *fakeStatsStore) ReserveEvent(_ context.Context, eventID string, _ time.Duration) (common.ReservationState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reserveCalls++
+	if f.reserveErr != nil {
+		return common.ReservationAcquired, f.reserveErr
+	}
+	if f.reservations == nil {
+		f.reservations = map[string]string{}
+	}
+	switch f.reservations[eventID] {
+	case "":
+		f.reservations[eventID] = reservationProcessing
+		return common.ReservationAcquired, nil
+	case reservationProcessed:
+		return common.ReservationAlreadyProcessed, nil
+	default:
+		return common.ReservationInFlight, nil
+	}
+}
+
+func (f *fakeStatsStore) MarkProcessed(_ context.Context, eventID string, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.markCalls++
+	if f.markErr != nil {
+		return f.markErr
+	}
+	if f.reservations == nil {
+		f.reservations = map[string]string{}
+	}
+	f.reservations[eventID] = reservationProcessed
+	return nil
+}
+
+func (f *fakeStatsStore) ReleaseReservation(_ context.Context, eventID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.releaseCalls++
+	delete(f.reservations, eventID)
+	return nil
 }
 
 func (f *fakeStatsStore) SetStats(_ context.Context, _ string, _ []byte) error {
@@ -246,5 +303,204 @@ func TestProcessEvent_MalformedEventStillTracksByMatchID(t *testing.T) {
 	statsMu.Unlock()
 	if !exists {
 		t.Fatalf("expected an event with empty MatchID to be tracked under the empty-string key")
+	}
+}
+
+// --- deduplication / idempotency ---
+
+func TestProcessEvent_DuplicateEventIsNotDoubleCounted(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+
+	goal := MatchEvent{EventID: "evt-1", MatchID: "m1", Team: "Arsenal", EventType: "goal", Minute: 10}
+
+	processEvent(context.Background(), goal)
+	processEvent(context.Background(), goal) // Kafka redelivery of the same event
+
+	statsMu.Lock()
+	got := stats["m1"]
+	statsMu.Unlock()
+
+	if got.HomeGoals != 1 {
+		t.Fatalf("expected the redelivered goal to be counted once, got HomeGoals=%d", got.HomeGoals)
+	}
+	if len(fakePub.published) != 1 {
+		t.Fatalf("expected only the first delivery to publish stats, got %d publishes", len(fakePub.published))
+	}
+}
+
+func TestProcessEvent_DistinctEventIDsAreBothCounted(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+
+	// Two genuinely different goals that happen to look otherwise
+	// identical must both count — dedup keys on event ID, not content.
+	processEvent(context.Background(), MatchEvent{EventID: "evt-1", MatchID: "m1", Team: "Arsenal", EventType: "goal", Minute: 10})
+	processEvent(context.Background(), MatchEvent{EventID: "evt-2", MatchID: "m1", Team: "Arsenal", EventType: "goal", Minute: 10})
+
+	statsMu.Lock()
+	got := stats["m1"]
+	statsMu.Unlock()
+
+	if got.HomeGoals != 2 {
+		t.Fatalf("expected two distinct events to both count, got HomeGoals=%d", got.HomeGoals)
+	}
+}
+
+func TestProcessEvent_SameEventIDAcrossDifferentMatchesIsStillDeduplicated(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+
+	// Event IDs are globally unique by construction (see common.NewEventID),
+	// so the dedup key is not namespaced by match. This test documents that
+	// choice: reusing an ID across matches is a producer bug, and the second
+	// event is suppressed rather than silently corrupting a second match.
+	processEvent(context.Background(), MatchEvent{EventID: "evt-shared", MatchID: "m1", Team: "Arsenal", EventType: "goal"})
+	processEvent(context.Background(), MatchEvent{EventID: "evt-shared", MatchID: "m2", Team: "Chelsea", EventType: "goal"})
+
+	statsMu.Lock()
+	m1, m2 := stats["m1"], stats["m2"]
+	statsMu.Unlock()
+
+	if m1 == nil || m1.HomeGoals != 1 {
+		t.Fatalf("first match should have counted its goal, got %+v", m1)
+	}
+	if m2 != nil {
+		t.Fatalf("second match reused an event ID and must be suppressed, got %+v", m2)
+	}
+}
+
+func TestProcessEvent_EventWithoutIDIsProcessedWithoutDeduplication(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+
+	// Backward compatibility: a producer that predates event_id must not
+	// have its events dropped. They are processed, just not deduplicated.
+	noID := MatchEvent{MatchID: "m1", Team: "Arsenal", EventType: "goal"}
+	processEvent(context.Background(), noID)
+	processEvent(context.Background(), noID)
+
+	statsMu.Lock()
+	got := stats["m1"]
+	statsMu.Unlock()
+
+	if got.HomeGoals != 2 {
+		t.Fatalf("events without an ID cannot be deduplicated and should both count, got %d", got.HomeGoals)
+	}
+	if fakeStore.reserveCalls != 0 {
+		t.Fatalf("expected no reservation attempts for events without an ID, got %d", fakeStore.reserveCalls)
+	}
+}
+
+func TestProcessEvent_DedupeStoreFailureFailsOpen(t *testing.T) {
+	fakeStore := &fakeStatsStore{reserveErr: errors.New("redis unavailable")}
+	fakePub := &fakeStatsPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+
+	processEvent(context.Background(), MatchEvent{EventID: "evt-1", MatchID: "m1", Team: "Arsenal", EventType: "goal"})
+
+	statsMu.Lock()
+	got := stats["m1"]
+	statsMu.Unlock()
+
+	// Fail-open: losing an event outright is worse than risking a
+	// double-count during a Redis outage, so the event is still processed.
+	if got == nil || got.HomeGoals != 1 {
+		t.Fatalf("expected the event to be processed despite a dedup store failure, got %+v", got)
+	}
+}
+
+func TestProcessEvent_MarkProcessedFailureDoesNotLoseTheEvent(t *testing.T) {
+	fakeStore := &fakeStatsStore{markErr: errors.New("redis unavailable")}
+	fakePub := &fakeStatsPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+
+	processEvent(context.Background(), MatchEvent{EventID: "evt-1", MatchID: "m1", Team: "Arsenal", EventType: "goal"})
+
+	statsMu.Lock()
+	got := stats["m1"]
+	statsMu.Unlock()
+
+	// The aggregate must still reflect the event even if we could not
+	// record that fact; the reservation simply expires with its TTL.
+	if got == nil || got.HomeGoals != 1 {
+		t.Fatalf("expected the event to be aggregated even when MarkProcessed fails, got %+v", got)
+	}
+	if len(fakePub.published) != 1 {
+		t.Fatalf("expected stats to still be published, got %d", len(fakePub.published))
+	}
+}
+
+// TestProcessEvent_EventIsNotLostWhenProcessingNeverCompletes models the
+// crash-after-reserve case: a consumer claims the event and dies before
+// marking it processed. The reservation is left in "processing", and once
+// its TTL expires (simulated here by clearing it) the redelivery must be
+// aggregated rather than suppressed forever.
+func TestProcessEvent_EventIsNotLostWhenProcessingNeverCompletes(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+
+	event := MatchEvent{EventID: "evt-1", MatchID: "m1", Team: "Arsenal", EventType: "goal"}
+
+	// Consumer A reserves, then "crashes" before applying the event.
+	state, err := fakeStore.ReserveEvent(context.Background(), event.EventID, dedupeTTL)
+	if err != nil || state != common.ReservationAcquired {
+		t.Fatalf("expected to acquire the reservation, got %v (err=%v)", state, err)
+	}
+
+	// While the reservation is held, a redelivery is correctly skipped.
+	processEvent(context.Background(), event)
+	statsMu.Lock()
+	duringHold := stats["m1"]
+	statsMu.Unlock()
+	if duringHold != nil {
+		t.Fatalf("an in-flight reservation should suppress the redelivery, got %+v", duringHold)
+	}
+
+	// TTL expiry releases the abandoned reservation.
+	if err := fakeStore.ReleaseReservation(context.Background(), event.EventID); err != nil {
+		t.Fatalf("release failed: %v", err)
+	}
+
+	// The next redelivery must now be processed — the event is not lost.
+	processEvent(context.Background(), event)
+	statsMu.Lock()
+	afterExpiry := stats["m1"]
+	statsMu.Unlock()
+
+	if afterExpiry == nil || afterExpiry.HomeGoals != 1 {
+		t.Fatalf("expected the event to be recovered after the reservation expired, got %+v", afterExpiry)
+	}
+}
+
+func TestProcessEvent_ConcurrentDuplicatesAreCountedOnce(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+
+	event := MatchEvent{EventID: "evt-1", MatchID: "m1", Team: "Arsenal", EventType: "goal"}
+
+	const workers = 8
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			processEvent(context.Background(), event)
+		}()
+	}
+	wg.Wait()
+
+	statsMu.Lock()
+	got := stats["m1"]
+	statsMu.Unlock()
+
+	if got == nil || got.HomeGoals != 1 {
+		t.Fatalf("expected concurrent duplicates to be counted exactly once, got %+v", got)
 	}
 }

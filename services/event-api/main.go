@@ -55,6 +55,9 @@ var (
 	publishErrors = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "event_api_publish_errors_total", Help: "Total Kafka publish errors"},
 	)
+	eventIDsGenerated = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "event_api_event_ids_generated_total", Help: "Events that arrived without a client-supplied event_id"},
+	)
 	publishLatency = prometheus.NewHistogram(
 		prometheus.HistogramOpts{Name: "event_api_publish_duration_seconds", Help: "Kafka publish latency", Buckets: prometheus.DefBuckets},
 	)
@@ -65,7 +68,7 @@ var (
 )
 
 func init() {
-	prometheus.MustRegister(eventsReceived, eventsPublished, publishErrors, publishLatency, httpRequests)
+	prometheus.MustRegister(eventsReceived, eventsPublished, publishErrors, publishLatency, httpRequests, eventIDsGenerated)
 }
 
 func initTracer() func() {
@@ -153,11 +156,27 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// event_id is optional on the wire: a client that supplies one makes
+	// its own retries idempotent (the same ID is deduplicated downstream),
+	// while a client that omits one gets a generated ID here. Either way
+	// every event reaching Kafka carries an ID, so event-processor can
+	// always deduplicate. A supplied ID is validated because it becomes
+	// part of a Redis key downstream.
+	if event.EventID == "" {
+		event.EventID = common.NewEventID()
+		eventIDsGenerated.Inc()
+	} else if err := common.ValidateEventID(event.EventID); err != nil {
+		httpRequests.WithLabelValues("POST", "/events", "400").Inc()
+		http.Error(w, "invalid event_id: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	if event.Timestamp == "" {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339)
 	}
 
 	span.SetAttributes(
+		attribute.String("event.id", event.EventID),
 		attribute.String("match.id", event.MatchID),
 		attribute.String("event.type", event.EventType),
 		attribute.String("event.team", event.Team),
@@ -201,7 +220,7 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	eventsPublished.Inc()
 	httpRequests.WithLabelValues("POST", "/events", "202").Inc()
 
-	log.Printf("[%s] min:%d %s %s - %s", event.MatchID, event.Minute, event.EventType, event.Team, event.Player)
+	log.Printf("[%s] event=%s min:%d %s %s - %s", event.MatchID, event.EventID, event.Minute, event.EventType, event.Team, event.Player)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
