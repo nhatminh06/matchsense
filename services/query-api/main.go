@@ -22,9 +22,28 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
+// matchStore is the subset of Redis operations the handlers need, kept as
+// an interface so unit tests can substitute a fake and exercise "not
+// found" / "Redis unavailable" / corrupt-value paths without a real Redis.
+type matchStore interface {
+	ActiveMatchIDs(ctx context.Context) ([]string, error)
+	Get(ctx context.Context, key string) (string, error)
+}
+
+type redisMatchStore struct{ client *redis.Client }
+
+func (s redisMatchStore) ActiveMatchIDs(ctx context.Context) ([]string, error) {
+	return s.client.SMembers(ctx, "matches:active").Result()
+}
+
+func (s redisMatchStore) Get(ctx context.Context, key string) (string, error) {
+	return s.client.Get(ctx, key).Result()
+}
+
 var (
 	ctx    = context.Background()
 	rdb    *redis.Client
+	store  matchStore
 	tracer = otel.Tracer("query-api")
 
 	httpRequests = prometheus.NewCounterVec(
@@ -81,6 +100,7 @@ func main() {
 	port := common.GetEnv("PORT", "8083")
 
 	rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
+	store = redisMatchStore{client: rdb}
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Printf("WARNING: Redis not available: %v", err)
 	} else {
@@ -111,7 +131,7 @@ func matchesHandler(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	w.Header().Set("Content-Type", "application/json")
 
-	matchIDs, err := rdb.SMembers(ctx, "matches:active").Result()
+	matchIDs, err := store.ActiveMatchIDs(ctx)
 	if err != nil {
 		httpRequests.WithLabelValues("GET", "/matches", "500").Inc()
 		span.RecordError(err)
@@ -124,7 +144,7 @@ func matchesHandler(w http.ResponseWriter, r *http.Request) {
 
 	matches := []json.RawMessage{}
 	for _, id := range matchIDs {
-		data, err := rdb.Get(ctx, "match:"+id+":stats").Result()
+		data, err := store.Get(ctx, "match:"+id+":stats")
 		if err != nil {
 			continue
 		}
@@ -154,7 +174,7 @@ func matchDetailHandler(w http.ResponseWriter, r *http.Request) {
 
 	if len(parts) > 1 && parts[1] == "predictions" {
 		_, redisSpan := tracer.Start(ctx, "redis-get-predictions")
-		data, err := rdb.Get(ctx, "match:"+matchID+":predictions").Result()
+		data, err := store.Get(ctx, "match:"+matchID+":predictions")
 		redisSpan.End()
 
 		if err == redis.Nil {
@@ -172,7 +192,7 @@ func matchDetailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, redisSpan := tracer.Start(ctx, "redis-get-stats")
-	data, err := rdb.Get(ctx, "match:"+matchID+":stats").Result()
+	data, err := store.Get(ctx, "match:"+matchID+":stats")
 	redisSpan.End()
 
 	if err == redis.Nil {

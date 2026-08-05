@@ -23,8 +23,22 @@ import (
 
 type MatchEvent = common.MatchEvent
 
+// eventPublisher is the subset of the Kafka writer eventsHandler needs,
+// kept as an interface so unit tests can substitute a fake and exercise
+// the publish-failure path without a real Kafka broker.
+type eventPublisher interface {
+	Publish(ctx context.Context, msg kafka.Message) error
+}
+
+type kafkaEventPublisher struct{ writer *kafka.Writer }
+
+func (p kafkaEventPublisher) Publish(ctx context.Context, msg kafka.Message) error {
+	return p.writer.WriteMessages(ctx, msg)
+}
+
 var (
 	writer *kafka.Writer
+	pub    eventPublisher
 	tracer = otel.Tracer("event-api")
 
 	// NOTE: intentionally labeled only by event_type, not match_id.
@@ -96,6 +110,7 @@ func main() {
 		Balancer:     &kafka.RoundRobin{},
 		BatchTimeout: 10 * time.Millisecond,
 	}
+	pub = kafkaEventPublisher{writer: writer}
 	defer writer.Close()
 
 	mux := http.NewServeMux()
@@ -166,7 +181,7 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	otel.GetTextMapPropagator().Inject(publishCtx, common.KafkaHeaderCarrier{Headers: &headers})
 
 	start := time.Now()
-	err = writer.WriteMessages(context.Background(), kafka.Message{
+	err = pub.Publish(context.Background(), kafka.Message{
 		Key:     []byte(event.MatchID),
 		Value:   data,
 		Headers: headers,

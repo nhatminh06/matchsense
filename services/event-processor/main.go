@@ -52,10 +52,42 @@ type MatchStats struct {
 	UpdatedAt   string       `json:"updated_at"`
 }
 
+// statsStore is the subset of Redis operations processEvent needs. Kept as
+// an interface (rather than a concrete *redis.Client) so unit tests can
+// substitute a fake and exercise write-failure paths without a real Redis.
+type statsStore interface {
+	SetStats(ctx context.Context, key string, data []byte) error
+	AddActiveMatch(ctx context.Context, matchID string) error
+}
+
+// statsPublisher is the subset of the Kafka writer processEvent needs, for
+// the same reason as statsStore above.
+type statsPublisher interface {
+	Publish(ctx context.Context, msg kafka.Message) error
+}
+
+type redisStatsStore struct{ client *redis.Client }
+
+func (s redisStatsStore) SetStats(ctx context.Context, key string, data []byte) error {
+	return s.client.Set(ctx, key, data, 0).Err()
+}
+
+func (s redisStatsStore) AddActiveMatch(ctx context.Context, matchID string) error {
+	return s.client.SAdd(ctx, "matches:active", matchID).Err()
+}
+
+type kafkaStatsPublisher struct{ writer *kafka.Writer }
+
+func (p kafkaStatsPublisher) Publish(ctx context.Context, msg kafka.Message) error {
+	return p.writer.WriteMessages(ctx, msg)
+}
+
 var (
 	ctx     = context.Background()
 	rdb     *redis.Client
+	store   statsStore
 	writer  *kafka.Writer
+	pub     statsPublisher
 	statsMu sync.Mutex
 	stats   = make(map[string]*MatchStats)
 	tracer  = otel.Tracer("event-processor")
@@ -151,6 +183,7 @@ func main() {
 	metricsPort := common.GetEnv("METRICS_PORT", "8081")
 
 	rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
+	store = redisStatsStore{client: rdb}
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Printf("WARNING: Redis not available: %v", err)
 	} else {
@@ -174,6 +207,7 @@ func main() {
 		Balancer:     &kafka.RoundRobin{},
 		BatchTimeout: 10 * time.Millisecond,
 	}
+	pub = kafkaStatsPublisher{writer: writer}
 	defer writer.Close()
 
 	sigChan := make(chan os.Signal, 1)
@@ -229,24 +263,16 @@ func main() {
 	log.Println("Shutting down...")
 }
 
-func processEvent(parentCtx context.Context, event MatchEvent) {
-	spanCtx, span := tracer.Start(parentCtx, "process-match-event")
-	defer span.End()
-
-	span.SetAttributes(
-		attribute.String("match.id", event.MatchID),
-		attribute.String("event.type", event.EventType),
-		attribute.Int("event.minute", event.Minute),
-	)
-
-	statsMu.Lock()
-
-	matchStats, exists := stats[event.MatchID]
-	if !exists {
-		matchStats = &MatchStats{MatchID: event.MatchID, Events: []MatchEvent{}}
-		stats[event.MatchID] = matchStats
-	}
-
+// applyEvent mutates matchStats in place to reflect event, and reports
+// whether the event was attributed to the home team. It has no I/O, so it
+// can be unit-tested directly without a mutex, Redis, or Kafka.
+//
+// Note on delivery semantics: this function is purely additive — it does
+// not check event IDs or deduplicate. If the same event is delivered twice
+// (e.g. an at-least-once Kafka redelivery after a consumer restart before
+// the offset commit), it will be counted twice. There is currently no
+// idempotency guarantee anywhere in this pipeline.
+func applyEvent(matchStats *MatchStats, event MatchEvent) (isHome bool) {
 	// Only learn home/away identity from events that actually carry a team;
 	// otherwise an empty-team event (e.g. a whistle/foul with no team set)
 	// would permanently lock HomeTeam to "", breaking isHome forever after.
@@ -258,7 +284,7 @@ func processEvent(parentCtx context.Context, event MatchEvent) {
 		}
 	}
 
-	isHome := event.Team != "" && event.Team == matchStats.HomeTeam
+	isHome = event.Team != "" && event.Team == matchStats.HomeTeam
 
 	switch event.EventType {
 	case "goal":
@@ -305,12 +331,39 @@ func processEvent(parentCtx context.Context, event MatchEvent) {
 				matchStats.AwayRed++
 			}
 		}
+	default:
+		// Unknown event types (and events without a recognized EventType)
+		// still update minute/last-event/history below, they just don't
+		// bump any per-type counter.
 	}
 
 	matchStats.Minute = event.Minute
 	matchStats.LastEvent = event
 	matchStats.Events = append(matchStats.Events, event)
 	matchStats.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+
+	return isHome
+}
+
+func processEvent(parentCtx context.Context, event MatchEvent) {
+	spanCtx, span := tracer.Start(parentCtx, "process-match-event")
+	defer span.End()
+
+	span.SetAttributes(
+		attribute.String("match.id", event.MatchID),
+		attribute.String("event.type", event.EventType),
+		attribute.Int("event.minute", event.Minute),
+	)
+
+	statsMu.Lock()
+
+	matchStats, exists := stats[event.MatchID]
+	if !exists {
+		matchStats = &MatchStats{MatchID: event.MatchID, Events: []MatchEvent{}}
+		stats[event.MatchID] = matchStats
+	}
+
+	applyEvent(matchStats, event)
 
 	statsSnapshot := *matchStats
 	statsMu.Unlock()
@@ -325,15 +378,15 @@ func processEvent(parentCtx context.Context, event MatchEvent) {
 	}
 
 	_, redisSpan := tracer.Start(spanCtx, "redis-write-stats")
-	if err := rdb.Set(ctx, fmt.Sprintf("match:%s:stats", event.MatchID), data, 0).Err(); err != nil {
+	if err := store.SetStats(ctx, fmt.Sprintf("match:%s:stats", event.MatchID), data); err != nil {
 		redisWriteErrors.Inc()
 		log.Printf("ERROR: redis write (stats) failed for match %s: %v", event.MatchID, err)
 	}
-	if err := rdb.Set(ctx, fmt.Sprintf("match:%s:latest", event.MatchID), data, 0).Err(); err != nil {
+	if err := store.SetStats(ctx, fmt.Sprintf("match:%s:latest", event.MatchID), data); err != nil {
 		redisWriteErrors.Inc()
 		log.Printf("ERROR: redis write (latest) failed for match %s: %v", event.MatchID, err)
 	}
-	if err := rdb.SAdd(ctx, "matches:active", event.MatchID).Err(); err != nil {
+	if err := store.AddActiveMatch(ctx, event.MatchID); err != nil {
 		redisWriteErrors.Inc()
 		log.Printf("ERROR: redis SAdd failed for match %s: %v", event.MatchID, err)
 	}
@@ -344,7 +397,7 @@ func processEvent(parentCtx context.Context, event MatchEvent) {
 	var outHeaders []kafka.Header
 	otel.GetTextMapPropagator().Inject(publishCtx, common.KafkaHeaderCarrier{Headers: &outHeaders})
 
-	if err := writer.WriteMessages(ctx, kafka.Message{
+	if err := pub.Publish(ctx, kafka.Message{
 		Key:     []byte(event.MatchID),
 		Value:   data,
 		Headers: outHeaders,
