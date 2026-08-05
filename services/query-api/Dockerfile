@@ -1,4 +1,4 @@
-FROM golang:1.25-alpine AS builder
+FROM golang:1.26-alpine AS builder
 WORKDIR /app
 COPY services/common ./common
 COPY services/query-api/go.mod services/query-api/go.sum ./query-api/
@@ -7,7 +7,7 @@ RUN go mod download
 COPY services/query-api/. .
 RUN CGO_ENABLED=0 GOOS=linux go build -o query-api .
 
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk --no-cache add ca-certificates && \
     adduser -D -u 10001 app
 WORKDIR /app
