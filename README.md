@@ -92,6 +92,7 @@ file. Notable ones:
 |---|---|---|
 | `KAFKA_BROKER` | `kafka:29092` | Kafka bootstrap address |
 | `REDIS_URL` | `redis:6379` | Redis address |
+| `DEDUPE_TTL` | `6h` | How long a processed `event_id` is remembered (event-processor) |
 | `GRAFANA_ADMIN_PASSWORD` | `matchsense` | Grafana admin password |
 
 > The `matchsense` default Grafana password is a **local-development
@@ -107,6 +108,16 @@ curl http://localhost:8083/matches/ars-mci-2026/predictions
 curl -X POST http://localhost:8080/events \
   -H 'Content-Type: application/json' \
   -d '{"match_id":"demo-1","event_type":"shot","team":"Arsenal","player":"Saka","minute":12,"x":88,"y":45,"detail":"on_target"}'
+```
+
+`event_id` is optional. Supply your own to make retries idempotent — resending
+the same ID is deduplicated rather than double-counted — or omit it and
+`event-api` generates one:
+
+```bash
+curl -X POST http://localhost:8080/events \
+  -H 'Content-Type: application/json' \
+  -d '{"event_id":"evt-demo-1-goal-1","match_id":"demo-1","event_type":"goal","team":"Arsenal","player":"Saka","minute":12}'
 ```
 
 ## Testing
@@ -186,10 +197,14 @@ docs/             Architecture, deployment, observability, security, ML docs
 - **Simulated events, not a licensed live feed.** `match-simulator`
   generates a synthetic match; there is no integration with a real
   football data provider.
-- **No deduplication.** `event-processor` has no event-identity or
-  idempotency mechanism — a redelivered Kafka message (e.g. after a
-  consumer restart before an offset commit) is counted again. This is
-  verified by a unit test, not just a design note.
+- **At-least-once delivery, not exactly-once.** Kafka can redeliver a
+  message after a consumer restart. `event-processor` deduplicates those
+  redeliveries by `event_id` so statistics stay correct, but this is
+  idempotent handling of at-least-once delivery — not exactly-once
+  processing, which this pipeline does not provide. The deduplication
+  window is bounded by a TTL (`DEDUPE_TTL`, default 6h): a redelivery
+  arriving after it expires would be counted again. See
+  [Event delivery semantics](docs/architecture.md#event-delivery-semantics).
 - **Demonstration ML models.** The xG and win-probability models are
   trained on simulator-generated data, not real match data, and have no
   published accuracy/calibration evaluation. They demonstrate the
@@ -214,8 +229,8 @@ docs/             Architecture, deployment, observability, security, ML docs
 
 ## Roadmap
 
-- Add durable event IDs and idempotent processing (duplicate events are
-  currently double-counted — see Known Limitations)
+- Add bounded consumer retries and a dead-letter topic for events that
+  cannot be processed
 - Add an integration/end-to-end test across the full event-api →
   event-processor → ml-predictor → query-api pipeline
 - Add Prometheus alerting rules (dashboards exist; alerts don't yet)

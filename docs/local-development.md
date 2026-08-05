@@ -98,16 +98,19 @@ What's covered:
 
 - **event-processor** (`main_test.go`): goal/shot/on-target/corner/foul/
   card aggregation, home/away team detection (including the empty-team
-  edge case), unknown event types, `processEvent`'s Redis-write-failure
-  and Kafka-publish-failure paths, and two explicit findings —
-  **duplicate events are double-counted** and **out-of-order events are
-  not reordered or rejected**, because this pipeline has no event-identity
-  or deduplication mechanism today. That's a real, current gap, not a
-  guarantee — see the Known Limitations section of the README.
+  edge case), unknown event types, and `processEvent`'s Redis-write-failure
+  and Kafka-publish-failure paths. Deduplication is covered separately:
+  duplicate delivery, distinct IDs, IDs reused across matches, events with
+  no ID, dedup-store failure (fail-open), `MarkProcessed` failure,
+  crash-before-completion recovery, and concurrent duplicates. Out-of-order
+  delivery is still **not** reordered or rejected — that remains a
+  documented behaviour, not a guarantee (see
+  [Event delivery semantics](architecture.md#event-delivery-semantics)).
 - **event-api** (`main_test.go`): valid event acceptance, invalid JSON,
   missing required fields, wrong HTTP method, Kafka publish failure
-  (returns 500), and that a client-supplied timestamp is preserved rather
-  than overwritten.
+  (returns 500), that a client-supplied timestamp is preserved rather
+  than overwritten, and `event_id` handling — generated when absent,
+  unique across requests, preserved when supplied, rejected when malformed.
 - **query-api** (`main_test.go`): listing active matches, skipping a match
   whose stats key is missing, Redis-unavailable handling, existing vs.
   missing match detail, the "stats present but predictions absent"
