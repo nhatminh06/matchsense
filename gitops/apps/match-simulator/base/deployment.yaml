@@ -18,7 +18,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: match-simulator
-          image: ghcr.io/nhatminh06/match-simulator@sha256:11cf3df5ca52a53d3485ad028ad0cf914693d0bedca853f79fd023ede75466de
+          image: ghcr.io/nhatminh06/match-simulator@sha256:0dc307cec0a917ab4f546884ea694423334dd87e59223dc60978b3707fe6e161
           env:
             - name: EVENT_API_URL
               value: "http://event-api:8080"
