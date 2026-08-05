@@ -7,6 +7,10 @@ scrape_configs:
     static_configs:
       - targets: ["event-api:8080"]
 
+  - job_name: "event-processor"
+    static_configs:
+      - targets: ["event-processor:8081"]
+
   - job_name: "query-api"
     static_configs:
       - targets: ["query-api:8083"]

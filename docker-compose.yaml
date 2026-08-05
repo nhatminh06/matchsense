@@ -29,7 +29,9 @@ services:
 
   # --- Application Services ---
   event-api:
-    build: ./services/event-api
+    build:
+      context: .
+      dockerfile: services/event-api/Dockerfile
     ports:
       - "8080:8080"
     environment:
@@ -40,17 +42,24 @@ services:
       - kafka
 
   event-processor:
-    build: ./services/event-processor
+    build:
+      context: .
+      dockerfile: services/event-processor/Dockerfile
+    ports:
+      - "8081:8081"
     environment:
       - KAFKA_BROKER=kafka:29092
       - REDIS_URL=redis:6379
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4318
+      - METRICS_PORT=8081
     depends_on:
       - kafka
       - redis
 
   query-api:
-    build: ./services/query-api
+    build:
+      context: .
+      dockerfile: services/query-api/Dockerfile
     ports:
       - "8083:8083"
     environment:
@@ -74,13 +83,18 @@ services:
       - redis
 
   match-simulator:
-    build: ./services/match-simulator
+    build:
+      context: .
+      dockerfile: services/match-simulator/Dockerfile
+    ports:
+      - "8082:8082"
     environment:
       - EVENT_API_URL=http://event-api:8080
       - MATCH_ID=ars-mci-2026
       - HOME_TEAM=Arsenal
       - AWAY_TEAM=Manchester City
       - SPEED=2
+      - HEALTH_PORT=8082
     depends_on:
       - event-api
 

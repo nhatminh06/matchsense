@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'services/event-api/**'
+      - 'services/common/**'
   pull_request:
     branches: [main]
     paths:
       - 'services/event-api/**'
+      - 'services/common/**'
   workflow_dispatch: {}
 
 env:
@@ -49,7 +51,8 @@ jobs:
       - name: Build image locally
         uses: docker/build-push-action@v7
         with:
-          context: ./services/event-api
+          context: .
+          file: services/event-api/Dockerfile
           push: false
           load: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}

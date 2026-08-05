@@ -40,7 +40,7 @@ cd services/event-api   # or any other Go service
 go build ./...
 go vet ./...
 gofmt -l .              # should print nothing — CI fails if it does
-go test -race ./...     # currently "[no test files]" for most services
+go test -race ./...
 ```
 
 **ml-predictor**:
@@ -51,6 +51,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python -m compileall .
 pip install ruff && ruff check --select F .
+pip install pytest httpx && pytest -v
 ```
 
 ## Local observability
@@ -85,18 +86,49 @@ docker compose up --build
 
 ## Test coverage status
 
-Most services have no automated tests yet. This is a real, open gap — see
-the [Roadmap in the README](../README.md#roadmap). CI enforces `gofmt`,
-`go vet`, `go build`, and `go test` (which currently passes only because
-there's nothing to test) for the Go services, and a `ruff check --select F`
-plus a compile check for `ml-predictor`. If you add a service's first test
-file, CI will start actually running it — no workflow changes needed.
+All 5 services now have a unit test suite (`go test` for the 4 Go
+services, `pytest` for ml-predictor). None of them require Docker, a real
+Kafka broker, or a real Redis instance — Kafka/Redis interactions are
+exercised through small interfaces (`statsStore`/`statsPublisher` in
+event-processor, `eventPublisher` in event-api, `matchStore` in query-api)
+with fakes substituted in tests, and ml-predictor's tests run against the
+real committed model artifacts under `services/ml-predictor/models/`.
 
-Priority areas for future test coverage, in order of risk:
+What's covered:
 
-1. `event-processor`'s stats-aggregation logic (`processEvent`) — the most
-   stateful, bug-prone code in the system
-2. `ml-predictor`'s feature construction (`predict_xg`,
-   `predict_win_probability`) — silent feature-shape mismatches would fail
-   quietly
-3. HTTP handler validation in `event-api` / `query-api`
+- **event-processor** (`main_test.go`): goal/shot/on-target/corner/foul/
+  card aggregation, home/away team detection (including the empty-team
+  edge case), unknown event types, `processEvent`'s Redis-write-failure
+  and Kafka-publish-failure paths, and two explicit findings —
+  **duplicate events are double-counted** and **out-of-order events are
+  not reordered or rejected**, because this pipeline has no event-identity
+  or deduplication mechanism today. That's a real, current gap, not a
+  guarantee — see the Known Limitations section of the README.
+- **event-api** (`main_test.go`): valid event acceptance, invalid JSON,
+  missing required fields, wrong HTTP method, Kafka publish failure
+  (returns 500), and that a client-supplied timestamp is preserved rather
+  than overwritten.
+- **query-api** (`main_test.go`): listing active matches, skipping a match
+  whose stats key is missing, Redis-unavailable handling, existing vs.
+  missing match detail, the "stats present but predictions absent"
+  placeholder response, and an empty match ID.
+- **match-simulator** (`main_test.go`): structural/schema invariants of
+  generated events (valid team, minute, and 0-100 coordinate bounds) and
+  the goal-always-follows-an-on-target-shot invariant, checked across many
+  iterations rather than asserting exact output — event generation draws
+  from the global `math/rand` source and has no seed parameter, so it
+  isn't currently deterministic.
+- **ml-predictor** (`test_app.py`): `predict_xg` bounds and default-value
+  handling, `predict_win_probability` returning all three outcomes summing
+  to ~1.0, both prediction functions' behavior when a model failed to
+  load (`None`), and the `/health`, `/predict/xg`, and `/metrics` HTTP
+  endpoints via FastAPI's `TestClient`.
+
+What's still not covered (open gaps, not silently ignored):
+
+- ml-predictor's Kafka consumer loop (`kafka_consumer_loop`) itself isn't
+  unit-tested — only the prediction functions it calls are
+- No integration/end-to-end test exercises the full
+  event-api → event-processor → ml-predictor → query-api pipeline
+  together; each service is tested in isolation
+- Model-training scripts under `ml/train/` have no tests
