@@ -18,7 +18,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: query-api
-          image: ghcr.io/nhatminh06/query-api@sha256:0f1bc99b21b9adff5c5d08a84531032d6e12d773d315c64a0405bf7bf61a6c30
+          image: ghcr.io/nhatminh06/query-api@sha256:e1d168d40a41a43d032736e7e9c48b07ecfc0dab808d97c9bdfef5800b3575d7
           ports:
             - containerPort: 8083
           env:
