@@ -111,12 +111,14 @@ curl -X POST http://localhost:8080/events \
 
 ## Testing
 
-Most services don't have automated tests yet — CI currently enforces
-`gofmt`/`go vet`/`go build` (and `go test`, which will start actually
-asserting things once tests are added) for the Go services, and a
-lint/compile check for `ml-predictor`. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for how to run these locally, and [docs/local-development.md](docs/local-development.md#test-coverage-status)
-for the current coverage gaps.
+All 5 services have unit tests (`go test` for the 4 Go services, `pytest`
+for ml-predictor), none of which require Docker, Kafka, or Redis — Kafka
+and Redis calls are exercised through small interfaces with fakes
+substituted in tests. This is unit coverage of business logic in
+isolation, not an end-to-end test of the full pipeline running together.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to run these locally, and
+[docs/local-development.md](docs/local-development.md#test-coverage-status)
+for exactly what's covered and what isn't.
 
 ## Observability
 
@@ -179,11 +181,48 @@ docs/             Architecture, deployment, observability, security, ML docs
 - [docs/ml-pipeline.md](docs/ml-pipeline.md)
 - [docs/troubleshooting.md](docs/troubleshooting.md)
 
+## Known limitations
+
+- **Simulated events, not a licensed live feed.** `match-simulator`
+  generates a synthetic match; there is no integration with a real
+  football data provider.
+- **No deduplication.** `event-processor` has no event-identity or
+  idempotency mechanism — a redelivered Kafka message (e.g. after a
+  consumer restart before an offset commit) is counted again. This is
+  verified by a unit test, not just a design note.
+- **Demonstration ML models.** The xG and win-probability models are
+  trained on simulator-generated data, not real match data, and have no
+  published accuracy/calibration evaluation. They demonstrate the
+  ingestion → inference → serving integration, not competitive sports
+  analytics accuracy.
+- **Single-replica local development.** Every service runs as one
+  instance under Docker Compose; this is not a high-availability setup.
+- **Redis is a serving store, not durable history.** There's no separate
+  analytical/historical data store — Redis holds only the latest stats
+  and predictions per match.
+- **No alerting.** Prometheus/Grafana provide dashboards and metrics, not
+  proactive notification (see [docs/observability.md](docs/observability.md)).
+- **Kubernetes deployment is manifests, not a verified cluster run.** The
+  Kustomize/ArgoCD/Kyverno setup is real and validated locally
+  (`kubectl kustomize` builds cleanly for every overlay), but this
+  repository does not claim it has been applied to and verified against a
+  live cluster.
+- **Security controls demonstrate workflow patterns**, not a complete
+  production security program — see [docs/security.md](docs/security.md)
+  for exactly what's covered.
+- **No LICENSE file exists yet** — see [License](#license) below.
+
 ## Roadmap
 
-- Add real test coverage for the stats-aggregation and prediction logic
+- Add durable event IDs and idempotent processing (duplicate events are
+  currently double-counted — see Known Limitations)
+- Add an integration/end-to-end test across the full event-api →
+  event-processor → ml-predictor → query-api pipeline
 - Add Prometheus alerting rules (dashboards exist; alerts don't yet)
+- Add real model evaluation metrics for the xG/win-probability models
+- Add API authentication
 - Ingest a real event feed instead of only the simulator
+- Add a LICENSE (currently unset — see [License](#license))
 
 ## Contributing
 
