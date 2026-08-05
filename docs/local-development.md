@@ -115,12 +115,14 @@ What's covered:
   whose stats key is missing, Redis-unavailable handling, existing vs.
   missing match detail, the "stats present but predictions absent"
   placeholder response, and an empty match ID.
-- **match-simulator** (`main_test.go`): structural/schema invariants of
-  generated events (valid team, minute, and 0-100 coordinate bounds) and
-  the goal-always-follows-an-on-target-shot invariant, checked across many
-  iterations rather than asserting exact output — event generation draws
-  from the global `math/rand` source and has no seed parameter, so it
-  isn't currently deterministic.
+- **match-simulator** (`main_test.go`): seeded determinism (the same seed
+  replays a byte-identical match, different seeds diverge, and draining the
+  global `math/rand` source cannot shift the stream), event schema and
+  0-100 coordinate bounds, the goal-always-follows-an-on-target-shot
+  invariant, bounded send retries (transient retried, 4xx not retried,
+  attempt budget capped, cancellation honoured), HTTP status
+  classification, and that the run loop stops promptly on cancellation and
+  survives an undeliverable event.
 - **ml-predictor** (`test_app.py`): `predict_xg` bounds and default-value
   handling, `predict_win_probability` returning all three outcomes summing
   to ~1.0, both prediction functions' behavior when a model failed to

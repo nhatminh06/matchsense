@@ -90,10 +90,16 @@ services:
       - "8082:8082"
     environment:
       - EVENT_API_URL=http://event-api:8080
-      - MATCH_ID=ars-mci-2026
-      - HOME_TEAM=Arsenal
-      - AWAY_TEAM=Manchester City
-      - SPEED=2
+      - SIMULATOR_MATCH_ID=ars-mci-2026
+      - SIMULATOR_HOME_TEAM=Arsenal
+      - SIMULATOR_AWAY_TEAM=Manchester City
+      - SIMULATOR_EVENT_INTERVAL=${SIMULATOR_EVENT_INTERVAL:-2s}
+      # Set SIMULATOR_SEED to replay the exact same match; unset gives a
+      # different match each run.
+      - SIMULATOR_SEED=${SIMULATOR_SEED:-}
+      # Set to false to serve /health only, e.g. so a deterministic test
+      # can drive its own events without a background match racing it.
+      - SIMULATOR_AUTO_START=${SIMULATOR_AUTO_START:-true}
       - HEALTH_PORT=8082
     depends_on:
       - event-api

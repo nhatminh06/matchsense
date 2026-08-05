@@ -93,6 +93,9 @@ file. Notable ones:
 | `KAFKA_BROKER` | `kafka:29092` | Kafka bootstrap address |
 | `REDIS_URL` | `redis:6379` | Redis address |
 | `DEDUPE_TTL` | `6h` | How long a processed `event_id` is remembered (event-processor) |
+| `SIMULATOR_SEED` | *(unset)* | Fixed seed makes the simulated match reproducible; unset gives a different match each run |
+| `SIMULATOR_AUTO_START` | `true` | `false` serves `/health` only, so a test can drive its own events |
+| `SIMULATOR_EVENT_INTERVAL` | `2s` | Real time per simulated match-minute (supersedes `SPEED`) |
 | `GRAFANA_ADMIN_PASSWORD` | `matchsense` | Grafana admin password |
 
 > The `matchsense` default Grafana password is a **local-development

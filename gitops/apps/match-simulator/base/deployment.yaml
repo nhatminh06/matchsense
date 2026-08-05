@@ -24,14 +24,16 @@ spec:
           env:
             - name: EVENT_API_URL
               value: "http://event-api:8080"
-            - name: MATCH_ID
+            - name: SIMULATOR_MATCH_ID
               value: "ars-mci-2026"
-            - name: HOME_TEAM
+            - name: SIMULATOR_HOME_TEAM
               value: "Arsenal"
-            - name: AWAY_TEAM
+            - name: SIMULATOR_AWAY_TEAM
               value: "Manchester City"
-            - name: SPEED
-              value: "2"
+            - name: SIMULATOR_EVENT_INTERVAL
+              value: "2s"
+            - name: SIMULATOR_AUTO_START
+              value: "true"
             - name: HEALTH_PORT
               value: "8082"
           resources:
