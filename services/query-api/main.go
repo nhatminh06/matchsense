@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
+	"github.com/nhatminh06/matchsense/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
@@ -44,15 +44,8 @@ func init() {
 	prometheus.MustRegister(httpRequests, queryLatency, activeMatches)
 }
 
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
 func initTracer() func() {
-	otlpEndpoint := getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "jaeger:4318")
+	otlpEndpoint := common.GetEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "jaeger:4318")
 
 	exporter, err := otlptracehttp.New(
 		context.Background(),
@@ -84,8 +77,8 @@ func main() {
 	shutdown := initTracer()
 	defer shutdown()
 
-	redisAddr := getEnv("REDIS_URL", "localhost:6379")
-	port := getEnv("PORT", "8083")
+	redisAddr := common.GetEnv("REDIS_URL", "localhost:6379")
+	port := common.GetEnv("PORT", "8083")
 
 	rdb = redis.NewClient(&redis.Options{Addr: redisAddr})
 	if err := rdb.Ping(ctx).Err(); err != nil {

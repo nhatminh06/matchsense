@@ -5,10 +5,12 @@ on:
     branches: [main]
     paths:
       - 'services/query-api/**'
+      - 'services/common/**'
   pull_request:
     branches: [main]
     paths:
       - 'services/query-api/**'
+      - 'services/common/**'
   workflow_dispatch: {}
 
 env:
@@ -49,7 +51,8 @@ jobs:
       - name: Build image locally
         uses: docker/build-push-action@v5
         with:
-          context: ./services/query-api
+          context: .
+          file: services/query-api/Dockerfile
           push: false
           load: true
           tags: ${{ env.IMAGE }}:${{ github.sha }}

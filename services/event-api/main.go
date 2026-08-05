@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
-	"os"
 	"time"
 
+	"github.com/nhatminh06/matchsense/common"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/segmentio/kafka-go"
@@ -21,17 +21,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 )
 
-type MatchEvent struct {
-	MatchID   string  `json:"match_id"`
-	Minute    int     `json:"minute"`
-	EventType string  `json:"event_type"`
-	Team      string  `json:"team"`
-	Player    string  `json:"player"`
-	X         float64 `json:"x"`
-	Y         float64 `json:"y"`
-	Detail    string  `json:"detail,omitempty"`
-	Timestamp string  `json:"timestamp"`
-}
+type MatchEvent = common.MatchEvent
 
 var (
 	writer *kafka.Writer
@@ -64,15 +54,8 @@ func init() {
 	prometheus.MustRegister(eventsReceived, eventsPublished, publishErrors, publishLatency, httpRequests)
 }
 
-func getEnv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
-}
-
 func initTracer() func() {
-	otlpEndpoint := getEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "jaeger:4318")
+	otlpEndpoint := common.GetEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "jaeger:4318")
 
 	exporter, err := otlptracehttp.New(
 		context.Background(),
@@ -100,38 +83,12 @@ func initTracer() func() {
 	}
 }
 
-// kafkaHeaderCarrier adapts kafka.Header slice to satisfy TextMapCarrier
-type kafkaHeaderCarrier struct {
-	headers *[]kafka.Header
-}
-
-func (c kafkaHeaderCarrier) Get(key string) string {
-	for _, h := range *c.headers {
-		if h.Key == key {
-			return string(h.Value)
-		}
-	}
-	return ""
-}
-
-func (c kafkaHeaderCarrier) Set(key string, value string) {
-	*c.headers = append(*c.headers, kafka.Header{Key: key, Value: []byte(value)})
-}
-
-func (c kafkaHeaderCarrier) Keys() []string {
-	keys := make([]string, len(*c.headers))
-	for i, h := range *c.headers {
-		keys[i] = h.Key
-	}
-	return keys
-}
-
 func main() {
 	shutdown := initTracer()
 	defer shutdown()
 
-	kafkaBroker := getEnv("KAFKA_BROKER", "localhost:9092")
-	port := getEnv("PORT", "8080")
+	kafkaBroker := common.GetEnv("KAFKA_BROKER", "localhost:9092")
+	port := common.GetEnv("PORT", "8080")
 
 	writer = &kafka.Writer{
 		Addr:         kafka.TCP(kafkaBroker),
@@ -194,15 +151,22 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 
 	eventsReceived.WithLabelValues(event.EventType).Inc()
 
-	data, _ := json.Marshal(event)
+	data, err := json.Marshal(event)
+	if err != nil {
+		httpRequests.WithLabelValues("POST", "/events", "500").Inc()
+		span.RecordError(err)
+		log.Printf("ERROR: failed to marshal event: %v", err)
+		http.Error(w, "failed to process event", http.StatusInternalServerError)
+		return
+	}
 
 	publishCtx, publishSpan := tracer.Start(ctx, "kafka-publish")
 
 	var headers []kafka.Header
-	otel.GetTextMapPropagator().Inject(publishCtx, kafkaHeaderCarrier{headers: &headers})
+	otel.GetTextMapPropagator().Inject(publishCtx, common.KafkaHeaderCarrier{Headers: &headers})
 
 	start := time.Now()
-	err := writer.WriteMessages(context.Background(), kafka.Message{
+	err = writer.WriteMessages(context.Background(), kafka.Message{
 		Key:     []byte(event.MatchID),
 		Value:   data,
 		Headers: headers,
