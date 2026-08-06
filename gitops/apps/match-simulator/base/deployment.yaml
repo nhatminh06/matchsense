@@ -18,7 +18,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: match-simulator
-          image: ghcr.io/nhatminh06/match-simulator@sha256:666dd5aa3d3743610e15de78988ec481c55344d95d1ca4748797056c2afa3ee1
+          image: ghcr.io/nhatminh06/match-simulator@sha256:2d17e7a8ec7040e908b9970681692da781582adadbc808867c877956e5c1f119
           ports:
             - containerPort: 8082
           env:
