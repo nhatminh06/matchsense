@@ -89,6 +89,22 @@ type statsPublisher interface {
 	Publish(ctx context.Context, msg kafka.Message) error
 }
 
+// dlqPublisher routes an unprocessable message to the dead-letter topic,
+// kept as an interface for the same reason as statsStore/statsPublisher.
+type dlqPublisher interface {
+	PublishDLQ(ctx context.Context, record common.DLQRecord) error
+}
+
+type kafkaDLQPublisher struct{ writer *kafka.Writer }
+
+func (p kafkaDLQPublisher) PublishDLQ(ctx context.Context, record common.DLQRecord) error {
+	data, err := json.Marshal(record)
+	if err != nil {
+		return fmt.Errorf("marshal DLQ record: %w", err)
+	}
+	return p.writer.WriteMessages(ctx, kafka.Message{Value: data})
+}
+
 type redisStatsStore struct{ client *redis.Client }
 
 func (s redisStatsStore) SetStats(ctx context.Context, key string, data []byte) error {
@@ -156,6 +172,8 @@ var (
 	store   statsStore
 	writer  *kafka.Writer
 	pub     statsPublisher
+	dlqW    *kafka.Writer
+	dlq     dlqPublisher
 	statsMu sync.Mutex
 	stats   = make(map[string]*MatchStats)
 	tracer  = otel.Tracer("event-processor")
@@ -183,11 +201,20 @@ var (
 	redisWriteErrors = prometheus.NewCounter(
 		prometheus.CounterOpts{Name: "event_processor_redis_write_errors_total", Help: "Total errors writing stats to Redis"},
 	)
+	unparseableMessages = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "event_processor_unparseable_messages_total", Help: "Kafka messages that failed to parse as a MatchEvent and were routed to the DLQ"},
+	)
+	dlqPublished = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "event_processor_dlq_published_total", Help: "Messages successfully routed to the dead-letter topic"},
+	)
+	dlqPublishErrors = prometheus.NewCounter(
+		prometheus.CounterOpts{Name: "event_processor_dlq_publish_errors_total", Help: "Messages that could not be routed to the DLQ even after retrying, and were dropped"},
+	)
 )
 
 func init() {
 	prometheus.MustRegister(eventsProcessed, kafkaReadErrors, kafkaWriteErrors, redisWriteErrors,
-		duplicateEvents, eventsWithoutID, dedupeErrors)
+		duplicateEvents, eventsWithoutID, dedupeErrors, unparseableMessages, dlqPublished, dlqPublishErrors)
 }
 
 func initTracer() func() {
@@ -300,6 +327,15 @@ func main() {
 	pub = kafkaStatsPublisher{writer: writer}
 	defer writer.Close()
 
+	dlqW = &kafka.Writer{
+		Addr:         kafka.TCP(kafkaBroker),
+		Topic:        "match-events-dlq",
+		Balancer:     &kafka.RoundRobin{},
+		BatchTimeout: 10 * time.Millisecond,
+	}
+	dlq = kafkaDLQPublisher{writer: dlqW}
+	defer dlqW.Close()
+
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
@@ -322,7 +358,12 @@ func main() {
 		const maxReadBackoff = 30 * time.Second
 
 		for {
-			msg, err := reader.ReadMessage(ctx)
+			// FetchMessage (rather than the auto-committing ReadMessage)
+			// gives explicit control over when an offset is committed, so
+			// a message is only marked done once handleMessage has either
+			// processed it or routed it to the DLQ — not the instant it's
+			// fetched.
+			msg, err := reader.FetchMessage(ctx)
 			if err != nil {
 				kafkaReadErrors.Inc()
 				log.Printf("ERROR reading: %v (retrying in %s)", err, readBackoff)
@@ -335,17 +376,14 @@ func main() {
 			}
 			readBackoff = time.Second
 
-			var event MatchEvent
-			if err := json.Unmarshal(msg.Value, &event); err != nil {
-				log.Printf("ERROR parsing: %v", err)
-				continue
+			handleMessage(ctx, msg)
+
+			if err := reader.CommitMessages(ctx, msg); err != nil {
+				// The message was still handled (processed or DLQ'd); a
+				// commit failure only risks redelivering it, which is
+				// exactly the redelivery case deduplication exists for.
+				log.Printf("ERROR committing offset for match-events[%d]@%d: %v", msg.Partition, msg.Offset, err)
 			}
-
-			// Extract trace context from Kafka headers
-			headers := msg.Headers
-			extractedCtx := otel.GetTextMapPropagator().Extract(ctx, common.KafkaHeaderCarrier{Headers: &headers})
-
-			processEvent(extractedCtx, event)
 		}
 	}()
 
@@ -490,6 +528,70 @@ func markProcessed(ctx context.Context, event MatchEvent) {
 		dedupeErrors.WithLabelValues("mark_processed").Inc()
 		log.Printf("WARNING: could not mark event %s processed: %v", event.EventID, err)
 	}
+}
+
+const (
+	maxDLQAttempts  = 3
+	dlqRetryBackoff = 100 * time.Millisecond
+)
+
+// routeToDLQ publishes a message that could not be parsed to the
+// dead-letter topic, retrying a bounded number of times before giving up.
+//
+// The caller commits the original message's offset regardless of the
+// outcome here: refusing to commit would block every message behind it on
+// this one partition forever, for a message that by definition cannot be
+// fixed by retrying its parse. If the DLQ publish itself exhausts its
+// retries, the message is logged at CRITICAL and then lost — a real,
+// documented limitation of routing failure records through the same kind
+// of at-least-once, best-effort channel as everything else in this
+// pipeline.
+func routeToDLQ(ctx context.Context, msg kafka.Message, reason error) {
+	unparseableMessages.Inc()
+
+	record := common.DLQRecord{
+		OriginalTopic:     msg.Topic,
+		OriginalPartition: msg.Partition,
+		OriginalOffset:    msg.Offset,
+		Payload:           msg.Value,
+		FailureReason:     reason.Error(),
+		FailedAt:          time.Now().UTC(),
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= maxDLQAttempts; attempt++ {
+		record.Attempts = attempt
+		if err := dlq.PublishDLQ(ctx, record); err == nil {
+			dlqPublished.Inc()
+			log.Printf("routed unparseable message (topic=%s partition=%d offset=%d) to DLQ: %v",
+				msg.Topic, msg.Partition, msg.Offset, reason)
+			return
+		} else {
+			lastErr = err
+		}
+		if attempt < maxDLQAttempts {
+			time.Sleep(dlqRetryBackoff * time.Duration(attempt))
+		}
+	}
+
+	dlqPublishErrors.Inc()
+	log.Printf("CRITICAL: could not route unparseable message (topic=%s partition=%d offset=%d) to DLQ after %d attempts, message will be lost: %v (parse error: %v)",
+		msg.Topic, msg.Partition, msg.Offset, maxDLQAttempts, lastErr, reason)
+}
+
+// handleMessage parses one Kafka message and either routes it to the DLQ
+// (permanently unparseable) or hands it to processEvent. It has no Kafka
+// reader/committer dependency, so it is directly unit-testable.
+func handleMessage(ctx context.Context, msg kafka.Message) {
+	var event MatchEvent
+	if err := json.Unmarshal(msg.Value, &event); err != nil {
+		routeToDLQ(ctx, msg, err)
+		return
+	}
+
+	headers := msg.Headers
+	extractedCtx := otel.GetTextMapPropagator().Extract(ctx, common.KafkaHeaderCarrier{Headers: &headers})
+	processEvent(extractedCtx, event)
 }
 
 func processEvent(parentCtx context.Context, event MatchEvent) {

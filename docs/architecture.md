@@ -47,6 +47,11 @@ match-simulator ──HTTP──▶ event-api ──Kafka(match-events)──▶
 |---|---|---|---|
 | `match-events` | event-api | event-processor | Raw `MatchEvent` (goal/shot/foul/corner/card) |
 | `match-stats` | event-processor | ml-predictor | Full `MatchStats` snapshot after each event |
+| `match-events-dlq` | event-processor | *(none — inspect manually)* | `common.DLQRecord`: original topic/partition/offset/payload, failure reason, attempt count, timestamp |
+
+All three topics rely on Kafka's `auto.create.topics.enable=true` (set in
+both Compose and the Kubernetes Kafka manifest); none are provisioned
+explicitly.
 
 ## Redis state
 
@@ -79,7 +84,9 @@ match-simulator ──HTTP──▶ event-api ──Kafka(match-events)──▶
   affected until Redis recovers.
 - If Kafka is down, event-api rejects new events with a 500 (publish
   failure is not swallowed); event-processor's read loop backs off
-  exponentially rather than spinning.
+  exponentially rather than spinning. A message that cannot be parsed is
+  routed to the `match-events-dlq` topic instead of being silently
+  dropped — see [Retries and dead-lettering](#retries-and-dead-lettering).
 - ml-predictor retries its Kafka connection up to 30 times at startup
   before giving up; per-message processing errors are caught, logged, and
   counted (`ml_predictor_processing_errors_total`) rather than crashing the
@@ -160,6 +167,39 @@ redelivery is then aggregated normally. This is covered by
 - **Event IDs are global, not per-match.** Reusing an ID across matches is
   a producer bug; the second event is suppressed rather than corrupting a
   second match.
+
+### Retries and dead-lettering
+
+`event-processor` consumes `match-events` with explicit offset control
+(`FetchMessage` + `CommitMessages`, not the auto-committing `ReadMessage`),
+so an offset is only committed after the message has been handled one way
+or another.
+
+**Kafka read errors** (broker unreachable, etc.) retry with exponential
+backoff, capped at 30s between attempts — unbounded in attempt count
+because reconnecting is the correct behaviour for a transport-level outage,
+but never busy-spinning.
+
+**Messages that fail to parse as a `MatchEvent`** are a different kind of
+failure: retrying the parse can never succeed. These are routed to the
+`match-events-dlq` topic instead, carrying the original topic/partition/
+offset, the raw payload, the failure reason, and an attempt count. The DLQ
+publish itself is retried up to 3 times with a short backoff, since a
+transient DLQ-topic failure *is* worth retrying.
+
+The offset is committed after this handling either way. Refusing to commit
+would block every message behind a bad one on that partition forever, for
+a message that cannot become parseable by being redelivered. If the DLQ
+publish also exhausts its retries — a true double failure — the message is
+logged at `CRITICAL` and dropped; this is a real, documented gap rather
+than a hidden one; see `event_processor_dlq_publish_errors_total`.
+
+Downstream processing failures (Redis/Kafka publish errors inside
+`processEvent`) are handled differently, and deliberately not routed to
+the DLQ: they already fail open (the event is aggregated and the failure
+is only counted), and the event has already been marked `processed` for
+deduplication purposes by that point — sending it to a DLQ meant for retry
+would imply it should be reprocessed, which would violate that guarantee.
 
 ### Ordering
 

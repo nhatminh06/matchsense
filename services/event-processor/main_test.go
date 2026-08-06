@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -502,5 +503,149 @@ func TestProcessEvent_ConcurrentDuplicatesAreCountedOnce(t *testing.T) {
 
 	if got == nil || got.HomeGoals != 1 {
 		t.Fatalf("expected concurrent duplicates to be counted exactly once, got %+v", got)
+	}
+}
+
+// --- DLQ / malformed message handling ---
+
+type fakeDLQPublisher struct {
+	mu        sync.Mutex
+	published []common.DLQRecord
+	failFor   int // fail this many calls before succeeding
+	calls     int
+}
+
+func (f *fakeDLQPublisher) PublishDLQ(_ context.Context, record common.DLQRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls <= f.failFor {
+		return errors.New("dlq broker unavailable")
+	}
+	f.published = append(f.published, record)
+	return nil
+}
+
+func (f *fakeDLQPublisher) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func TestHandleMessage_MalformedJSONRoutesToDLQ(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	fakeDLQ := &fakeDLQPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+	dlq = fakeDLQ
+
+	msg := kafka.Message{Topic: "match-events", Partition: 2, Offset: 42, Value: []byte(`{not valid json`)}
+	handleMessage(context.Background(), msg)
+
+	if len(fakeDLQ.published) != 1 {
+		t.Fatalf("expected 1 DLQ record, got %d", len(fakeDLQ.published))
+	}
+	rec := fakeDLQ.published[0]
+	if rec.OriginalTopic != "match-events" || rec.OriginalPartition != 2 || rec.OriginalOffset != 42 {
+		t.Fatalf("DLQ record lost the original message coordinates: %+v", rec)
+	}
+	if string(rec.Payload) != `{not valid json` {
+		t.Fatalf("DLQ record did not preserve the original payload: %q", rec.Payload)
+	}
+	if rec.FailureReason == "" {
+		t.Fatal("expected a non-empty failure reason")
+	}
+	// The malformed message must not have reached the aggregate.
+	statsMu.Lock()
+	n := len(stats)
+	statsMu.Unlock()
+	if n != 0 {
+		t.Fatalf("a DLQ'd message must not be aggregated, got %d matches in memory", n)
+	}
+}
+
+func TestHandleMessage_ValidEventIsProcessedNotDLQd(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	fakeDLQ := &fakeDLQPublisher{}
+	resetGlobalState(t, fakeStore, fakePub)
+	dlq = fakeDLQ
+
+	event := MatchEvent{EventID: "evt-1", MatchID: "m1", Team: "Arsenal", EventType: "goal"}
+	data, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("failed to marshal fixture event: %v", err)
+	}
+
+	handleMessage(context.Background(), kafka.Message{Topic: "match-events", Value: data})
+
+	if len(fakeDLQ.published) != 0 {
+		t.Fatalf("a valid event must not be routed to the DLQ, got %d records", len(fakeDLQ.published))
+	}
+	statsMu.Lock()
+	got := stats["m1"]
+	statsMu.Unlock()
+	if got == nil || got.HomeGoals != 1 {
+		t.Fatalf("expected the valid event to be aggregated, got %+v", got)
+	}
+}
+
+func TestRouteToDLQ_RetriesTransientFailureThenSucceeds(t *testing.T) {
+	fakeDLQ := &fakeDLQPublisher{failFor: 2}
+	dlq = fakeDLQ
+
+	routeToDLQ(context.Background(), kafka.Message{Topic: "match-events", Offset: 1}, errors.New("bad json"))
+
+	if fakeDLQ.callCount() != 3 {
+		t.Fatalf("expected 3 attempts (2 failures + 1 success), got %d", fakeDLQ.callCount())
+	}
+	if len(fakeDLQ.published) != 1 {
+		t.Fatalf("expected the record to eventually be published, got %d", len(fakeDLQ.published))
+	}
+	if fakeDLQ.published[0].Attempts != 3 {
+		t.Fatalf("expected the record to report 3 attempts, got %d", fakeDLQ.published[0].Attempts)
+	}
+}
+
+func TestRouteToDLQ_GivesUpAfterBoundedAttemptsWithoutPanicking(t *testing.T) {
+	// This is the double-failure case: the message can't be parsed AND the
+	// DLQ itself is unreachable. The bound must still hold — the process
+	// must not retry forever or crash, even though the message is lost.
+	fakeDLQ := &fakeDLQPublisher{failFor: 1000}
+	dlq = fakeDLQ
+
+	routeToDLQ(context.Background(), kafka.Message{Topic: "match-events", Offset: 1}, errors.New("bad json"))
+
+	if fakeDLQ.callCount() != maxDLQAttempts {
+		t.Fatalf("expected exactly %d attempts, got %d", maxDLQAttempts, fakeDLQ.callCount())
+	}
+	if len(fakeDLQ.published) != 0 {
+		t.Fatalf("expected no successful publish, got %d", len(fakeDLQ.published))
+	}
+}
+
+func TestHandleMessage_DLQPublishFailureDoesNotPanicOrBlockFurtherMessages(t *testing.T) {
+	fakeStore := &fakeStatsStore{}
+	fakePub := &fakeStatsPublisher{}
+	fakeDLQ := &fakeDLQPublisher{failFor: 1000}
+	resetGlobalState(t, fakeStore, fakePub)
+	dlq = fakeDLQ
+
+	// A message that can't be parsed AND can't be DLQ'd must not prevent
+	// the next (valid) message on the same "partition" from being handled.
+	handleMessage(context.Background(), kafka.Message{Topic: "match-events", Value: []byte(`not json`)})
+
+	valid := MatchEvent{EventID: "evt-2", MatchID: "m1", Team: "Arsenal", EventType: "shot"}
+	data, err := json.Marshal(valid)
+	if err != nil {
+		t.Fatalf("failed to marshal fixture event: %v", err)
+	}
+	handleMessage(context.Background(), kafka.Message{Topic: "match-events", Value: data})
+
+	statsMu.Lock()
+	got := stats["m1"]
+	statsMu.Unlock()
+	if got == nil || got.HomeShots != 1 {
+		t.Fatalf("expected the second, valid message to still be processed, got %+v", got)
 	}
 }

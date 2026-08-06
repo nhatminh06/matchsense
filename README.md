@@ -206,7 +206,11 @@ docs/             Architecture, deployment, observability, security, ML docs
   idempotent handling of at-least-once delivery — not exactly-once
   processing, which this pipeline does not provide. The deduplication
   window is bounded by a TTL (`DEDUPE_TTL`, default 6h): a redelivery
-  arriving after it expires would be counted again. See
+  arriving after it expires would be counted again. Messages that fail to
+  parse are routed to a `match-events-dlq` topic rather than silently
+  dropped; if that publish also fails after retrying, the message is
+  logged and lost — a real, documented double-failure gap, not a claimed
+  guarantee. See
   [Event delivery semantics](docs/architecture.md#event-delivery-semantics).
 - **Demonstration ML models.** The xG and win-probability models are
   trained on simulator-generated data, not real match data, and have no
@@ -231,8 +235,6 @@ docs/             Architecture, deployment, observability, security, ML docs
 
 ## Roadmap
 
-- Add bounded consumer retries and a dead-letter topic for events that
-  cannot be processed
 - Add an integration/end-to-end test across the full event-api →
   event-processor → ml-predictor → query-api pipeline
 - Add Prometheus alerting rules (dashboards exist; alerts don't yet)
