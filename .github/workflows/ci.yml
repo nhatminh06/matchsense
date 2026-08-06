@@ -101,6 +101,37 @@ jobs:
             echo "No test files found for ml-predictor yet — skipping pytest."
           fi
 
+  ml-train-checks:
+    name: Python checks (ml/train)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: ml/train/requirements.txt
+
+      - name: Install dependencies
+        working-directory: ml/train
+        run: pip install -r requirements.txt ruff
+
+      - name: Lint (ruff, pyflakes rules)
+        working-directory: ml/train
+        run: ruff check --select F .
+
+      - name: Compile check
+        working-directory: ml/train
+        run: python -m compileall .
+
+      - name: Run tests
+        working-directory: ml/train
+        # Fixture-sized (tens of rows), not the real 10000/5000-row
+        # datasets -- fast enough for every PR, not a full training run.
+        run: pytest -v
+
   markdown-lint:
     name: Markdown lint
     runs-on: ubuntu-latest
