@@ -18,7 +18,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: event-api
-          image: ghcr.io/nhatminh06/event-api@sha256:c64db6ca07f4a4f87654b8e3cb2a4b50b293ca3ebe375bc0d822247582ffd0b8
+          image: ghcr.io/nhatminh06/event-api@sha256:5785e849893c9613544c4900b87db6c2cbe1851ff9f9a547053f87ccce9b70af
           ports:
             - containerPort: 8080
           env:
