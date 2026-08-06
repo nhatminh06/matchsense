@@ -148,14 +148,15 @@ up (and what isn't — there's no alerting yet).
 
 Pretrained models live in `ml/models/`, trained entirely on synthetic,
 simulator-generated data — see [Known limitations](#known-limitations).
-Both the xG and win-probability models are evaluated against a naive
-baseline and beat it (xG: 0.226 log loss vs. a 0.284 baseline; win
-probability: 0.776 vs. 1.070); see
-[docs/ml-pipeline.md](docs/ml-pipeline.md) for the full metrics and what
-they do and don't demonstrate.
+Training now reports both models' metrics against a naive baseline (not
+just an absolute log loss / Brier score with nothing to compare it to)
+and writes a `.metadata.json` file recording exactly how each model was
+produced; see [docs/ml-pipeline.md](docs/ml-pipeline.md) for what that
+does and doesn't demonstrate.
 
 To regenerate training data and retrain (both scripts are seeded and
-reproducible, and write a `.metadata.json` file next to each model):
+reproducible, and write a `.metadata.json` file next to each model —
+requires **Python 3.11+**, see [docs/ml-pipeline.md](docs/ml-pipeline.md)):
 
 ```bash
 cd ml/train
@@ -223,11 +224,13 @@ docs/             Architecture, deployment, observability, security, ML docs
   guarantee. See
   [Event delivery semantics](docs/architecture.md#event-delivery-semantics).
 - **Demonstration ML models.** The xG and win-probability models are
-  trained and evaluated entirely on simulator-generated synthetic data,
-  never on real match data. They beat a naive baseline on that synthetic
-  distribution (see [docs/ml-pipeline.md](docs/ml-pipeline.md)), which
-  shows they've learned the simulator's own generating rules — it says
-  nothing about accuracy on real football, which has never been measured.
+  trained entirely on simulator-generated synthetic data, never on real
+  match data. Training now evaluates against a naive baseline instead of
+  reporting an absolute metric with nothing to compare it to (see
+  [docs/ml-pipeline.md](docs/ml-pipeline.md)) — but beating that baseline
+  would only show the model learned the simulator's own generating rules.
+  It says nothing about accuracy on real football, which has never been
+  measured.
 - **Single-replica local development.** Every service runs as one
   instance under Docker Compose; this is not a high-availability setup.
 - **Redis is a serving store, not durable history.** There's no separate

@@ -22,6 +22,9 @@ analytics.
 ## Training data & scripts
 
 Training data lives in `ml/data/`; training scripts live in `ml/train/`.
+Requires **Python 3.11+** — `requirements.txt` pins the same
+`scikit-learn` version as `services/ml-predictor`, and that version
+requires it.
 
 ```bash
 cd ml/train
@@ -73,20 +76,27 @@ the same match.
 Both training scripts report the trained model's metrics **against a
 naive baseline** (predict the training set's overall goal rate, or its
 class distribution, for every row) — an absolute log loss or Brier score
-means little without something to compare it to.
+means little without something to compare it to. Run `train_xg.py` /
+`train_win_prob.py` yourself to get the numbers and a
+`<model>.metadata.json` for your environment; this doc intentionally
+doesn't hardcode a specific run's numbers, since they'd go stale the
+moment the models are retrained.
 
-From the most recent run committed to this repository (see the metadata
-JSON files for the exact numbers and full feature importance):
+A model beating its baseline means it's extracting real signal from the
+synthetic features — it says nothing about accuracy on real matches, which
+has never been measured, here or anywhere in this repository.
 
-| Model | Metric | Model | Baseline |
-|---|---|---|---|
-| xG | ROC AUC | 0.760 | — |
-| xG | Log loss | 0.226 | 0.284 |
-| Win probability | Log loss | 0.776 | 1.070 |
-
-Both models beat their baseline, i.e. they're extracting real signal from
-the synthetic features — but this says nothing about their accuracy on
-real matches, which has never been measured.
+**scikit-learn version note:** `ml/train/requirements.txt` pins
+`scikit-learn` to the same version as
+`services/ml-predictor/requirements.txt`, and that version currently
+requires Python 3.11+. A model trained with a different scikit-learn
+version than the one `ml-predictor` installs is not guaranteed to be
+loadable — training in a mismatched environment produced models that
+`ml-predictor` failed to load (returning `None` from every prediction)
+during this repository's own CI, which is exactly how this requirement was
+discovered. If regenerating locally, verify the resulting models actually
+load under `ml-predictor`'s pinned scikit-learn version — e.g. by running
+its test suite — before committing them.
 
 ## Deploying a retrained model
 
