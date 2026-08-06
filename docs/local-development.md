@@ -102,9 +102,14 @@ What's covered:
   and Kafka-publish-failure paths. Deduplication is covered separately:
   duplicate delivery, distinct IDs, IDs reused across matches, events with
   no ID, dedup-store failure (fail-open), `MarkProcessed` failure,
-  crash-before-completion recovery, and concurrent duplicates. Out-of-order
-  delivery is still **not** reordered or rejected — that remains a
-  documented behaviour, not a guarantee (see
+  crash-before-completion recovery, and concurrent duplicates.
+  Dead-lettering is covered too: a malformed message is routed to the DLQ
+  and not aggregated, a valid message is aggregated and not DLQ'd, DLQ
+  publish retries on a transient failure, gives up after a bounded number
+  of attempts without panicking, and a message that fails both parsing and
+  DLQ delivery does not block the next (valid) message from being
+  processed. Out-of-order delivery is still **not** reordered or
+  rejected — that remains a documented behaviour, not a guarantee (see
   [Event delivery semantics](architecture.md#event-delivery-semantics)).
 - **event-api** (`main_test.go`): valid event acceptance, invalid JSON,
   missing required fields, wrong HTTP method, Kafka publish failure
