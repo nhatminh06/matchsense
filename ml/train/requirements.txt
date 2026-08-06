@@ -1,5 +1,9 @@
+# scikit-learn is pinned to match services/ml-predictor/requirements.txt.
+# A model must be loadable by the exact library version that serves it --
+# training with a different scikit-learn version than ml-predictor installs
+# is what broke CI the first time this file was written (see git history).
 pandas==2.3.3
 numpy==2.0.2
-scikit-learn==1.6.1
+scikit-learn==1.9.0
 joblib==1.5.3
 pytest==8.4.2
