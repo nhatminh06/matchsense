@@ -146,11 +146,22 @@ up (and what isn't — there's no alerting yet).
 
 ## ML model workflow
 
-Pretrained models live in `ml/models/`. To regenerate training data and
-retrain:
+Pretrained models live in `ml/models/`, trained entirely on synthetic,
+simulator-generated data — see [Known limitations](#known-limitations).
+Both the xG and win-probability models are evaluated against a naive
+baseline and beat it (xG: 0.226 log loss vs. a 0.284 baseline; win
+probability: 0.776 vs. 1.070); see
+[docs/ml-pipeline.md](docs/ml-pipeline.md) for the full metrics and what
+they do and don't demonstrate.
+
+To regenerate training data and retrain (both scripts are seeded and
+reproducible, and write a `.metadata.json` file next to each model):
 
 ```bash
 cd ml/train
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
 python generate_xg_data.py
 python generate_win_data.py
 python train_xg.py
@@ -158,8 +169,7 @@ python train_win_prob.py
 ```
 
 Retrained models need to be copied into `services/ml-predictor/models/`
-before rebuilding that service's image. See
-[docs/ml-pipeline.md](docs/ml-pipeline.md) for details.
+before rebuilding that service's image.
 
 ## Kubernetes and GitOps deployment
 
@@ -213,10 +223,11 @@ docs/             Architecture, deployment, observability, security, ML docs
   guarantee. See
   [Event delivery semantics](docs/architecture.md#event-delivery-semantics).
 - **Demonstration ML models.** The xG and win-probability models are
-  trained on simulator-generated data, not real match data, and have no
-  published accuracy/calibration evaluation. They demonstrate the
-  ingestion → inference → serving integration, not competitive sports
-  analytics accuracy.
+  trained and evaluated entirely on simulator-generated synthetic data,
+  never on real match data. They beat a naive baseline on that synthetic
+  distribution (see [docs/ml-pipeline.md](docs/ml-pipeline.md)), which
+  shows they've learned the simulator's own generating rules — it says
+  nothing about accuracy on real football, which has never been measured.
 - **Single-replica local development.** Every service runs as one
   instance under Docker Compose; this is not a high-availability setup.
 - **Redis is a serving store, not durable history.** There's no separate
@@ -238,7 +249,7 @@ docs/             Architecture, deployment, observability, security, ML docs
 - Add an integration/end-to-end test across the full event-api →
   event-processor → ml-predictor → query-api pipeline
 - Add Prometheus alerting rules (dashboards exist; alerts don't yet)
-- Add real model evaluation metrics for the xG/win-probability models
+- Evaluate the ML models against real match data, not just synthetic data
 - Add API authentication
 - Ingest a real event feed instead of only the simulator
 
