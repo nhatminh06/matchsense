@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /app
 COPY services/common ./common
 COPY services/query-api/go.mod services/query-api/go.sum ./query-api/
