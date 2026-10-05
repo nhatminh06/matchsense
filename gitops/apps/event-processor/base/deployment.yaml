@@ -18,7 +18,7 @@ spec:
       enableServiceLinks: false
       containers:
         - name: event-processor
-          image: ghcr.io/nhatminh06/event-processor@sha256:ce7b9d9de215369b50242588b69b50ea4c6ea07af1211b8440c19093e15e925e
+          image: ghcr.io/nhatminh06/event-processor@sha256:991efcb17addfef8f091e8d52fc2d9fa534ea0175a9b2cb171980d8635903f93
           ports:
             - containerPort: 8081
           env:
