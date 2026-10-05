@@ -1,4 +1,4 @@
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 WORKDIR /app
 COPY services/common ./common
 COPY services/event-api/go.mod services/event-api/go.sum ./event-api/
