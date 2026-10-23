@@ -241,8 +241,8 @@ jobs:
           grep -q 'name: grafana-admin' /tmp/grafana.yaml
           grep -q 'key: admin-password' /tmp/grafana.yaml
           grep -q 'optional: false' /tmp/grafana.yaml
-          ! grep -q 'nodePort:' /tmp/grafana.yaml
-          ! grep -A1 'name: GF_SECURITY_ADMIN_PASSWORD' /tmp/grafana.yaml | grep -q 'value:'
+          if grep -q 'nodePort:' /tmp/grafana.yaml; then exit 1; fi
+          if grep -A1 'name: GF_SECURITY_ADMIN_PASSWORD' /tmp/grafana.yaml | grep -q 'value:'; then exit 1; fi
 
   logging-pipeline:
     name: Alloy to Loki logging pipeline
