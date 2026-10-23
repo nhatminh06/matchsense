@@ -76,6 +76,8 @@ ArgoCD · Kyverno · Trivy · Cosign
 ```bash
 git clone https://github.com/nhatminh06/matchsense.git
 cd matchsense
+cp .env.example .env
+# Set GRAFANA_ADMIN_PASSWORD in .env to a unique password.
 docker compose up --build
 ```
 
@@ -96,11 +98,12 @@ file. Notable ones:
 | `SIMULATOR_SEED` | *(unset)* | Fixed seed makes the simulated match reproducible; unset gives a different match each run |
 | `SIMULATOR_AUTO_START` | `true` | `false` serves `/health` only, so a test can drive its own events |
 | `SIMULATOR_EVENT_INTERVAL` | `2s` | Real time per simulated match-minute (supersedes `SPEED`) |
-| `GRAFANA_ADMIN_PASSWORD` | `matchsense` | Grafana admin password |
+| `GRAFANA_ADMIN_PASSWORD` | *(required)* | Grafana admin password; store it only in the ignored `.env` file |
 
-> The `matchsense` default Grafana password is a **local-development
-> convenience only** — it is not safe for any environment reachable outside
-> your machine. Kubernetes deployments should override it via a real secret.
+Generate a unique password with `openssl rand -base64 32`, save it in a
+password manager, and put it in the ignored `.env` file. For Kubernetes,
+create the external `grafana-admin` Secret before ArgoCD synchronizes Grafana;
+see [Grafana credentials](docs/security.md#grafana-credentials).
 
 ## API examples
 
@@ -137,7 +140,8 @@ for exactly what's covered and what isn't.
 ## Observability
 
 - **Grafana**: http://localhost:3000 — the "MatchSense - Live Match"
-  dashboard is auto-provisioned on startup
+  dashboard is auto-provisioned on startup; all Compose ports bind only to
+  `127.0.0.1`
 - **Prometheus**: http://localhost:9090
 - **Jaeger**: http://localhost:16686
 

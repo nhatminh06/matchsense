@@ -15,8 +15,16 @@ Python 3.11+ (for ml-predictor).
 Bring up everything:
 
 ```bash
+cp .env.example .env
+openssl rand -base64 32
+# Save the generated value in a password manager and set it as
+# GRAFANA_ADMIN_PASSWORD in .env. The ignored .env file must not be committed.
 docker compose up --build
 ```
+
+Compose deliberately fails validation when `GRAFANA_ADMIN_PASSWORD` is absent
+or empty. Published development ports bind to `127.0.0.1`; service-to-service
+traffic still uses the private Compose network and service names.
 
 Bring up a subset (e.g. just the Go services, skipping observability):
 
@@ -56,12 +64,22 @@ pip install pytest httpx && pytest -v
 
 ## Local observability
 
-- Grafana: http://localhost:3000 (`admin` / `matchsense` locally)
+- Grafana: http://localhost:3000 (`admin` / the password from `.env`)
 - Prometheus: http://localhost:9090
 - Jaeger: http://localhost:16686
 
 The "MatchSense - Live Match" Grafana dashboard is auto-provisioned; give
 `match-simulator` a few seconds after startup before expecting data.
+
+For kind, Grafana is available through an authenticated local tunnel:
+
+```bash
+kubectl -n matchsense port-forward svc/grafana 3000:3000
+```
+
+Edits to `kind-config.yaml` port mappings only take effect after recreating the
+kind cluster. Cluster recreation is destructive and is always a manual step;
+do not recreate a cluster merely to apply manifest changes.
 
 ## Resetting local state
 
