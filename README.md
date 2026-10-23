@@ -66,7 +66,7 @@ single match event can be followed end to end in Jaeger.
 ## Technology stack
 
 Go 1.25 · Python 3.11 / FastAPI · scikit-learn · Kafka · Redis · Prometheus ·
-Grafana · Loki/Promtail · Jaeger · Docker Compose · Kubernetes · Kustomize ·
+Grafana · Loki/Grafana Alloy · Jaeger · Docker Compose · Kubernetes · Kustomize ·
 ArgoCD · Kyverno · Trivy · Cosign
 
 ## Local quick start
@@ -194,7 +194,7 @@ allow it into the cluster — see [docs/security.md](docs/security.md) and
 ```text
 services/        Go and Python service source + Dockerfiles
 gitops/           Kustomize bases/overlays, ArgoCD Application manifests, Kyverno policies
-observability/    Prometheus, Grafana, Loki, Promtail config
+observability/    Prometheus, Grafana, Loki, Alloy config
 ml/               Training data, training scripts, pretrained models
 docs/             Architecture, deployment, observability, security, ML docs
 .github/          CI workflows, issue/PR templates, Dependabot config

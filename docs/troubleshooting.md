@@ -13,6 +13,20 @@ startup to begin emitting events, and `event-processor`/`ml-predictor` need
 at least one full event round-trip before Redis has anything for
 `query-api` to serve or Prometheus has anything to plot.
 
+**An application container fails to start with a syslog connection error.**
+The Docker daemon cannot reach Alloy at `tcp://127.0.0.1:1514`. First verify
+`docker compose up -d loki alloy` succeeds. Native Linux Docker Engine uses the
+default address. Docker Desktop may require
+`ALLOY_SYSLOG_ADDRESS=tcp://host.docker.internal:1514`; support varies by
+Desktop backend. Follow [the compatibility guidance](observability.md#log-collection)
+and do not mount `docker.sock` as a workaround.
+
+**Loki has no application logs.** Check `docker compose logs alloy loki`, then
+query `{service_name="event-api"}` in Grafana Explore. On Kubernetes, also run
+`kubectl -n matchsense auth can-i get pods/log --as=system:serviceaccount:matchsense:alloy`
+and check the Alloy pod. The collector intentionally ignores pods outside the
+`matchsense` namespace and applications outside its documented allowlist.
+
 **`docker compose build` fails on a Go service with a missing
 `services/common` error.** The 4 Go services build from the repository
 root as their Docker context (not their own service directory), because

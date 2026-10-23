@@ -39,7 +39,16 @@ services:
       - KAFKA_BROKER=kafka:29092
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4318
     depends_on:
-      - kafka
+      kafka:
+        condition: service_started
+      alloy:
+        condition: service_healthy
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "${ALLOY_SYSLOG_ADDRESS:-tcp://127.0.0.1:1514}"
+        syslog-format: rfc5424micro
+        tag: event-api
 
   event-processor:
     build:
@@ -53,8 +62,18 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4318
       - METRICS_PORT=8081
     depends_on:
-      - kafka
-      - redis
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+      alloy:
+        condition: service_healthy
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "${ALLOY_SYSLOG_ADDRESS:-tcp://127.0.0.1:1514}"
+        syslog-format: rfc5424micro
+        tag: event-processor
 
   query-api:
     build:
@@ -67,7 +86,16 @@ services:
       - REDIS_URL=redis:6379
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4318
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      alloy:
+        condition: service_healthy
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "${ALLOY_SYSLOG_ADDRESS:-tcp://127.0.0.1:1514}"
+        syslog-format: rfc5424micro
+        tag: query-api
 
   ml-predictor:
     build: ./services/ml-predictor
@@ -79,8 +107,18 @@ services:
       - MODEL_DIR=/app/models
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     depends_on:
-      - kafka
-      - redis
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_started
+      alloy:
+        condition: service_healthy
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "${ALLOY_SYSLOG_ADDRESS:-tcp://127.0.0.1:1514}"
+        syslog-format: rfc5424micro
+        tag: ml-predictor
 
   match-simulator:
     build:
@@ -102,7 +140,16 @@ services:
       - SIMULATOR_AUTO_START=${SIMULATOR_AUTO_START:-true}
       - HEALTH_PORT=8082
     depends_on:
-      - event-api
+      event-api:
+        condition: service_started
+      alloy:
+        condition: service_healthy
+    logging:
+      driver: syslog
+      options:
+        syslog-address: "${ALLOY_SYSLOG_ADDRESS:-tcp://127.0.0.1:1514}"
+        syslog-format: rfc5424micro
+        tag: match-simulator
 
   # --- Observability ---
   prometheus:
@@ -138,12 +185,31 @@ services:
       - ./observability/loki/loki-config.yml:/etc/loki/local-config.yaml
     command: -config.file=/etc/loki/local-config.yaml
 
-  promtail:
-    image: grafana/promtail:3.1.0
+  alloy:
+    image: grafana/alloy:v1.21.2
+    user: "473:473"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:1514:1514"
     volumes:
-      - ./observability/promtail/promtail-config.yml:/etc/promtail/config.yml
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    command: -config.file=/etc/promtail/config.yml
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    tmpfs:
+      - /tmp:uid=473,gid=473,mode=1770
+    command:
+      - run
+      - --server.http.listen-addr=127.0.0.1:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/1514'"]
+      interval: 2s
+      timeout: 1s
+      retries: 15
     depends_on:
       - loki
 
@@ -154,3 +220,6 @@ services:
       - "127.0.0.1:4318:4318"
     environment:
       - COLLECTOR_OTLP_ENABLED=true
+
+volumes:
+  alloy-data:

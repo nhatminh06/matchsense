@@ -3,5 +3,5 @@ kind: Kustomization
 resources:
   - loki-configmap.yaml
   - loki.yaml
-  - promtail-configmap.yaml
-  - promtail.yaml
+  - alloy-configmap.yaml
+  - alloy.yaml

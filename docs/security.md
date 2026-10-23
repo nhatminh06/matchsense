@@ -78,10 +78,6 @@ persistent Grafana data before rotating production credentials.
 - **High:** `event-api` and `query-api` have no authentication. Keep them on
   trusted development networks; add authenticated ingress/API authorization
   before exposing them to untrusted clients.
-- **High:** Compose Promtail mounts the Docker socket. The `:ro` bind does not
-  make Docker API methods read-only, so compromise can become host-level
-  control. Replace Docker discovery with a least-privilege log driver/collector
-  before production use.
 - **Medium:** Prometheus remains a Kubernetes NodePort and can disclose labels,
   topology, and operational metrics. Bind it locally in kind today; move it to
   ClusterIP plus authenticated port-forward/ingress in a follow-up.
@@ -140,6 +136,13 @@ runs with read-only `contents` permission.
 
 All 5 services' Docker images run as a non-root user (`USER app`, uid
 10001) in their final stage.
+
+Grafana Alloy also runs as a non-root user with a read-only root filesystem,
+no added capabilities, and no privilege escalation. Log collectors never
+mount the Docker socket. Kubernetes collection uses namespace-scoped read-only
+RBAC for `pods` and `pods/log`; it has no ClusterRole, DaemonSet, privileged
+container, or node `hostPath` mount. See [observability.md](observability.md#log-collection)
+for the Docker Desktop limitation and safe alternatives.
 
 ## Responsible vulnerability reporting
 
