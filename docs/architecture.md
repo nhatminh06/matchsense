@@ -23,7 +23,9 @@ match-simulator ──HTTP──▶ event-api ──Kafka(match-events)──▶
 ## Service responsibilities
 
 - **event-api** (Go) — validates and accepts match events over HTTP, publishes
-  them to the `match-events` Kafka topic. Stateless.
+  them to the `match-events` Kafka topic. `POST /events` requires the shared
+  `X-API-Key`, applies a bounded per-instance rate limit, and caps request and
+  Kafka-publish time. Stateless.
 - **event-processor** (Go) — the only stateful service. Consumes
   `match-events`, maintains an in-memory `map[string]*MatchStats` per match
   (guarded by a mutex), persists each update to Redis, republishes the

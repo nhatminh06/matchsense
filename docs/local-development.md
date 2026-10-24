@@ -17,14 +17,17 @@ Bring up everything:
 ```bash
 cp .env.example .env
 openssl rand -base64 32
-# Save the generated value in a password manager and set it as
-# GRAFANA_ADMIN_PASSWORD in .env. The ignored .env file must not be committed.
+# Generate a separate ingestion key with: openssl rand -hex 32
+# Save both values in a password manager and set GRAFANA_ADMIN_PASSWORD and
+# EVENT_API_KEY in .env. The ignored .env file must not be committed.
 docker compose up --build
 ```
 
-Compose deliberately fails validation when `GRAFANA_ADMIN_PASSWORD` is absent
-or empty. Published development ports bind to `127.0.0.1`; service-to-service
-traffic still uses the private Compose network and service names.
+Compose deliberately fails validation when `GRAFANA_ADMIN_PASSWORD` or
+`EVENT_API_KEY` is absent or empty. The same event key is injected into
+`event-api` and `match-simulator`. Published development ports bind to
+`127.0.0.1`; service-to-service traffic still uses the private Compose network
+and service names.
 
 On Linux Docker Engine, application logs are sent to Alloy at the loopback-only
 TCP syslog port `1514` and written to Loki. Docker Desktop users must read the
@@ -135,11 +138,10 @@ What's covered:
   processed. Out-of-order delivery is still **not** reordered or
   rejected — that remains a documented behaviour, not a guarantee (see
   [Event delivery semantics](architecture.md#event-delivery-semantics)).
-- **event-api** (`main_test.go`): valid event acceptance, invalid JSON,
-  missing required fields, wrong HTTP method, Kafka publish failure
-  (returns 500), that a client-supplied timestamp is preserved rather
-  than overwritten, and `event_id` handling — generated when absent,
-  unique across requests, preserved when supplied, rejected when malformed.
+- **event-api** (`main_test.go`): API-key authentication, health-probe access,
+  content type/body/JSON/field bounds, rate limiting, bounded and cancelled
+  Kafka publishes, valid event acceptance, Kafka failures, timestamp handling,
+  and `event_id` generation, preservation, uniqueness, and validation.
 - **query-api** (`main_test.go`): listing active matches, skipping a match
   whose stats key is missing, Redis-unavailable handling, existing vs.
   missing match detail, the "stats present but predictions absent"
@@ -150,8 +152,9 @@ What's covered:
   0-100 coordinate bounds, the goal-always-follows-an-on-target-shot
   invariant, bounded send retries (transient retried, 4xx not retried,
   attempt budget capped, cancellation honoured), HTTP status
-  classification, and that the run loop stops promptly on cancellation and
-  survives an undeliverable event.
+  classification (including 401/429/5xx), authenticated request headers, and
+  that the run loop stops promptly on cancellation and survives an
+  undeliverable event.
 - **ml-predictor** (`test_app.py`): `predict_xg` bounds and default-value
   handling, `predict_win_probability` returning all three outcomes summing
   to ~1.0, both prediction functions' behavior when a model failed to

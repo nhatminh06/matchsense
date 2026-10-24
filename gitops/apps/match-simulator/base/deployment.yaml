@@ -24,6 +24,12 @@ spec:
           env:
             - name: EVENT_API_URL
               value: "http://event-api:8080"
+            - name: EVENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: event-api-auth
+                  key: api-key
+                  optional: false
             - name: SIMULATOR_MATCH_ID
               value: "ars-mci-2026"
             - name: SIMULATOR_HOME_TEAM

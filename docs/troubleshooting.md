@@ -40,6 +40,18 @@ the ignored `.env`, generate a password with `openssl rand -base64 32`, store
 it in a password manager, and assign it to `GRAFANA_ADMIN_PASSWORD`. Empty
 values are intentionally rejected.
 
+**Compose says `EVENT_API_KEY` is required, or event ingestion returns 401.**
+Generate a key with `openssl rand -hex 32`, store it in a password manager, and
+set the same value in the ignored `.env` used by Compose clients. Kubernetes
+uses the external `event-api-auth` Secret with key `api-key`; if it is missing,
+both event-api and the simulator intentionally remain pending rather than
+starting without authentication.
+
+**Event ingestion returns 429.** The event-api token bucket is per instance and
+defaults to 20 requests/second with a burst of 40. The simulator retries 429
+responses using its existing bounded backoff. Adjust `EVENT_API_RATE_LIMIT` and
+`EVENT_API_RATE_BURST` only after measuring legitimate ingestion traffic.
+
 **A changed Grafana password is not accepted.** Grafana uses
 `GF_SECURITY_ADMIN_PASSWORD` only when initializing a new database; changing
 the environment or Secret does not reset an existing database credential. Use

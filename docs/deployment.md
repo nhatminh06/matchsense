@@ -54,6 +54,11 @@ automated sync, prune, and self-heal enabled. Once a GitOps PR is merged,
 ArgoCD picks up the new image digest on its next sync and rolls the
 deployment.
 
+Before deploying `event-api` or `match-simulator`, create the external
+`event-api-auth` Secret with key `api-key` as documented in
+[security.md](security.md#event-ingestion-authentication). Both references are
+non-optional and use the same value; no Secret manifest is stored in Git.
+
 ## Kustomize overlays
 
 Each service has a `base/` (Deployment manifest) and an `overlays/dev/`

@@ -2,9 +2,20 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"log"
+	"math"
+	"mime"
 	"net/http"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/nhatminh06/matchsense/common"
@@ -36,10 +47,47 @@ func (p kafkaEventPublisher) Publish(ctx context.Context, msg kafka.Message) err
 	return p.writer.WriteMessages(ctx, msg)
 }
 
+const (
+	maxRequestBody = 16 << 10
+	maxStringField = 256
+	minAPIKeyBytes = 32
+)
+
+type tokenBucket struct {
+	mu     sync.Mutex
+	tokens float64
+	burst  float64
+	rate   float64
+	last   time.Time
+}
+
+func newTokenBucket(rate float64, burst int) *tokenBucket {
+	return &tokenBucket{tokens: float64(burst), burst: float64(burst), rate: rate, last: time.Now()}
+}
+
+func (b *tokenBucket) allow() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	now := time.Now()
+	b.tokens += now.Sub(b.last).Seconds() * b.rate
+	if b.tokens > b.burst {
+		b.tokens = b.burst
+	}
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
 var (
-	writer *kafka.Writer
-	pub    eventPublisher
-	tracer = otel.Tracer("event-api")
+	writer         *kafka.Writer
+	pub            eventPublisher
+	tracer         = otel.Tracer("event-api")
+	apiKey         string
+	limiter        = newTokenBucket(20, 40)
+	publishTimeout = 3 * time.Second
 
 	// NOTE: intentionally labeled only by event_type, not match_id.
 	// match_id is unbounded over the lifetime of the service (a new
@@ -101,6 +149,25 @@ func initTracer() func() {
 }
 
 func main() {
+	var err error
+	apiKey, err = requiredAPIKey(os.Getenv("EVENT_API_KEY"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	rate, err := positiveFloatEnv("EVENT_API_RATE_LIMIT", 20)
+	if err != nil {
+		log.Fatal(err)
+	}
+	burst, err := positiveIntEnv("EVENT_API_RATE_BURST", 40)
+	if err != nil {
+		log.Fatal(err)
+	}
+	publishTimeout, err = positiveDurationEnv("EVENT_API_PUBLISH_TIMEOUT", 3*time.Second)
+	if err != nil {
+		log.Fatal(err)
+	}
+	limiter = newTokenBucket(rate, burst)
+
 	shutdown := initTracer()
 	defer shutdown()
 
@@ -121,10 +188,83 @@ func main() {
 	mux.HandleFunc("/events", eventsHandler)
 	mux.Handle("/metrics", promhttp.Handler())
 
-	handler := otelhttp.NewHandler(mux, "event-api")
+	handler := apiKeyMiddleware(otelhttp.NewHandler(mux, "event-api"))
 
+	server := &http.Server{
+		Addr:              ":" + port,
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
 	log.Printf("event-api starting on :%s (kafka: %s)", port, kafkaBroker)
-	log.Fatal(http.ListenAndServe(":"+port, handler))
+	log.Fatal(server.ListenAndServe())
+}
+
+func requiredAPIKey(key string) (string, error) {
+	if len(key) < minAPIKeyBytes {
+		return "", fmt.Errorf("EVENT_API_KEY must be set to at least %d characters", minAPIKeyBytes)
+	}
+	return key, nil
+}
+
+func positiveFloatEnv(name string, fallback float64) (float64, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil || v <= 0 || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, fmt.Errorf("%s must be a positive number", name)
+	}
+	return v, nil
+}
+
+func positiveIntEnv(name string, fallback int) (int, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("%s must be a positive integer", name)
+	}
+	return v, nil
+}
+
+func positiveDurationEnv(name string, fallback time.Duration) (time.Duration, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return fallback, nil
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil || v <= 0 {
+		return 0, fmt.Errorf("%s must be a positive duration", name)
+	}
+	return v, nil
+}
+
+func authorized(provided, expected string) bool {
+	providedHash := sha256.Sum256([]byte(provided))
+	expectedHash := sha256.Sum256([]byte(expected))
+	return subtle.ConstantTimeCompare(providedHash[:], expectedHash[:]) == 1
+}
+
+func apiKeyMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		provided := r.Header.Get("X-API-Key")
+		clean := r.Clone(r.Context())
+		clean.Header = r.Header.Clone()
+		clean.Header.Del("X-API-Key")
+		if r.URL.Path == "/events" && r.Method == http.MethodPost && !authorized(provided, apiKey) {
+			httpRequests.WithLabelValues("POST", "/events", "401").Inc()
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, clean)
+	})
 }
 
 func healthHandler(w http.ResponseWriter, r *http.Request) {
@@ -138,21 +278,53 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	defer span.End()
 
 	if r.Method != http.MethodPost {
-		httpRequests.WithLabelValues(r.Method, "/events", "405").Inc()
+		httpRequests.WithLabelValues("other", "/events", "405").Inc()
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !limiter.allow() {
+		httpRequests.WithLabelValues("POST", "/events", "429").Inc()
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
+		return
+	}
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		httpRequests.WithLabelValues("POST", "/events", "415").Inc()
+		http.Error(w, "content type must be application/json", http.StatusUnsupportedMediaType)
 		return
 	}
 
 	var event MatchEvent
-	if err := json.NewDecoder(r.Body).Decode(&event); err != nil {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&event); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			httpRequests.WithLabelValues("POST", "/events", "413").Inc()
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		httpRequests.WithLabelValues("POST", "/events", "400").Inc()
-		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			httpRequests.WithLabelValues("POST", "/events", "413").Inc()
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		httpRequests.WithLabelValues("POST", "/events", "400").Inc()
+		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
 
-	if event.MatchID == "" || event.EventType == "" {
+	if err := validateEvent(event); err != nil {
 		httpRequests.WithLabelValues("POST", "/events", "400").Inc()
-		http.Error(w, "match_id and event_type required", http.StatusBadRequest)
+		http.Error(w, "invalid event", http.StatusBadRequest)
 		return
 	}
 
@@ -167,12 +339,16 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 		eventIDsGenerated.Inc()
 	} else if err := common.ValidateEventID(event.EventID); err != nil {
 		httpRequests.WithLabelValues("POST", "/events", "400").Inc()
-		http.Error(w, "invalid event_id: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid event", http.StatusBadRequest)
 		return
 	}
 
 	if event.Timestamp == "" {
 		event.Timestamp = time.Now().UTC().Format(time.RFC3339)
+	} else if _, err := time.Parse(time.RFC3339, event.Timestamp); err != nil {
+		httpRequests.WithLabelValues("POST", "/events", "400").Inc()
+		http.Error(w, "invalid event", http.StatusBadRequest)
+		return
 	}
 
 	span.SetAttributes(
@@ -200,7 +376,9 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	otel.GetTextMapPropagator().Inject(publishCtx, common.KafkaHeaderCarrier{Headers: &headers})
 
 	start := time.Now()
-	err = pub.Publish(context.Background(), kafka.Message{
+	boundedCtx, cancel := context.WithTimeout(publishCtx, publishTimeout)
+	defer cancel()
+	err = pub.Publish(boundedCtx, kafka.Message{
 		Key:     []byte(event.MatchID),
 		Value:   data,
 		Headers: headers,
@@ -225,4 +403,24 @@ func eventsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
+}
+
+func validateEvent(event MatchEvent) error {
+	if event.MatchID == "" || len(event.MatchID) > 128 || strings.ContainsAny(event.MatchID, "\r\n") {
+		return errors.New("invalid match_id")
+	}
+	switch event.EventType {
+	case "goal", "shot", "foul", "card", "corner":
+	default:
+		return errors.New("invalid event_type")
+	}
+	for _, field := range []string{event.Team, event.Player, event.Detail, event.Timestamp} {
+		if len(field) > maxStringField || strings.ContainsAny(field, "\r\n") {
+			return errors.New("invalid string field")
+		}
+	}
+	if event.Minute < 0 || event.Minute > 120 || event.X < 0 || event.X > 100 || event.Y < 0 || event.Y > 100 {
+		return errors.New("invalid numeric field")
+	}
+	return nil
 }

@@ -209,6 +209,7 @@ jobs:
       - name: Validate docker-compose.yaml
         env:
           GRAFANA_ADMIN_PASSWORD: harmless-ci-only-password
+          EVENT_API_KEY: harmless-ci-only-event-api-key-32
         run: |
           docker compose config --quiet
           config=$(docker compose config --format json)
@@ -225,6 +226,14 @@ jobs:
         run: |
           if env -u GRAFANA_ADMIN_PASSWORD docker compose --env-file /dev/null config --quiet 2>/dev/null; then
             echo 'docker compose config unexpectedly accepted a missing GRAFANA_ADMIN_PASSWORD' >&2
+            exit 1
+          fi
+      - name: Require event API key
+        env:
+          GRAFANA_ADMIN_PASSWORD: harmless-ci-only-password
+        run: |
+          if env -u EVENT_API_KEY docker compose --env-file /dev/null config --quiet 2>/dev/null; then
+            echo 'docker compose config unexpectedly accepted a missing EVENT_API_KEY' >&2
             exit 1
           fi
 
@@ -250,6 +259,7 @@ jobs:
     timeout-minutes: 10
     env:
       GRAFANA_ADMIN_PASSWORD: harmless-ci-only-password
+      EVENT_API_KEY: harmless-ci-only-event-api-key-32
     steps:
       - uses: actions/checkout@v7
       - name: Start Loki and Alloy
@@ -302,7 +312,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: kubectl kustomize
-        run: kubectl kustomize gitops/apps/${{ matrix.service }}/overlays/dev > /dev/null
+        run: |
+          kubectl kustomize gitops/apps/${{ matrix.service }}/overlays/dev > /tmp/${{ matrix.service }}.yaml
+          if [[ "${{ matrix.service }}" == "event-api" || "${{ matrix.service }}" == "match-simulator" ]]; then
+            grep -q 'name: EVENT_API_KEY' /tmp/${{ matrix.service }}.yaml
+            grep -q 'name: event-api-auth' /tmp/${{ matrix.service }}.yaml
+            grep -q 'key: api-key' /tmp/${{ matrix.service }}.yaml
+            grep -q 'optional: false' /tmp/${{ matrix.service }}.yaml
+          fi
 
   loki-kustomize:
     name: Loki and Alloy Kustomize security

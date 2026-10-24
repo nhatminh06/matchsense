@@ -9,6 +9,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"os/signal"
 	"strconv"
 	"syscall"
@@ -149,6 +150,7 @@ type eventSender interface {
 type httpEventSender struct {
 	client *http.Client
 	url    string
+	apiKey string
 }
 
 func (h httpEventSender) Send(ctx context.Context, event MatchEvent) error {
@@ -162,6 +164,7 @@ func (h httpEventSender) Send(ctx context.Context, event MatchEvent) error {
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", h.apiKey)
 
 	resp, err := h.client.Do(req)
 	if err != nil {
@@ -169,7 +172,7 @@ func (h httpEventSender) Send(ctx context.Context, event MatchEvent) error {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 500 {
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		// Server-side failures are worth retrying.
 		return fmt.Errorf("event-api returned %d", resp.StatusCode)
 	}
@@ -301,6 +304,10 @@ func resolveSeed(raw string) (seed int64, seeded bool) {
 }
 
 func main() {
+	apiKey, err := requiredAPIKey(os.Getenv("EVENT_API_KEY"))
+	if err != nil {
+		log.Fatal(err)
+	}
 	eventAPIURL := common.GetEnv("EVENT_API_URL", "http://localhost:8080")
 	matchID := common.GetEnv("SIMULATOR_MATCH_ID", common.GetEnv("MATCH_ID", fmt.Sprintf("match_%d", time.Now().Unix())))
 	homeTeam := common.GetEnv("SIMULATOR_HOME_TEAM", common.GetEnv("HOME_TEAM", "Arsenal"))
@@ -347,11 +354,19 @@ func main() {
 	sender := httpEventSender{
 		client: &http.Client{Timeout: 5 * time.Second},
 		url:    eventAPIURL,
+		apiKey: apiKey,
 	}
 	newSimulator(seed, matchID, homeTeam, awayTeam).run(ctx, sender, minuteDelay)
 
 	stop()
 	shutdownServer(srv)
+}
+
+func requiredAPIKey(key string) (string, error) {
+	if len(key) < 32 {
+		return "", errors.New("EVENT_API_KEY must be set to at least 32 characters")
+	}
+	return key, nil
 }
 
 func shutdownServer(srv *http.Server) {
