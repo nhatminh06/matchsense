@@ -256,8 +256,7 @@ jobs:
         run: docker compose up -d loki alloy
       - name: Send and query a real log
         run: |
-          cleanup() { docker compose down -v; }
-          trap cleanup EXIT
+          trap 'docker compose down -v' EXIT
 
           for attempt in {1..30}; do
             if curl -fsS http://127.0.0.1:3100/ready >/dev/null && \
