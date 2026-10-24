@@ -77,7 +77,7 @@ ArgoCD · Kyverno · Trivy · Cosign
 git clone https://github.com/nhatminh06/matchsense.git
 cd matchsense
 cp .env.example .env
-# Set GRAFANA_ADMIN_PASSWORD in .env to a unique password.
+# Set GRAFANA_ADMIN_PASSWORD and EVENT_API_KEY in the ignored .env file.
 docker compose up --build
 ```
 
@@ -99,6 +99,10 @@ file. Notable ones:
 | `SIMULATOR_AUTO_START` | `true` | `false` serves `/health` only, so a test can drive its own events |
 | `SIMULATOR_EVENT_INTERVAL` | `2s` | Real time per simulated match-minute (supersedes `SPEED`) |
 | `GRAFANA_ADMIN_PASSWORD` | *(required)* | Grafana admin password; store it only in the ignored `.env` file |
+| `EVENT_API_KEY` | *(required)* | Shared ingestion key for event-api and match-simulator; at least 32 characters |
+| `EVENT_API_RATE_LIMIT` | `20` | Per-instance accepted ingestion requests per second |
+| `EVENT_API_RATE_BURST` | `40` | Per-instance token-bucket burst capacity |
+| `EVENT_API_PUBLISH_TIMEOUT` | `3s` | Maximum Kafka publish time per request |
 
 Generate a unique password with `openssl rand -base64 32`, save it in a
 password manager, and put it in the ignored `.env` file. For Kubernetes,
@@ -113,6 +117,7 @@ curl http://localhost:8083/matches/ars-mci-2026
 curl http://localhost:8083/matches/ars-mci-2026/predictions
 curl -X POST http://localhost:8080/events \
   -H 'Content-Type: application/json' \
+  -H "X-API-Key: $EVENT_API_KEY" \
   -d '{"match_id":"demo-1","event_type":"shot","team":"Arsenal","player":"Saka","minute":12,"x":88,"y":45,"detail":"on_target"}'
 ```
 
@@ -123,6 +128,7 @@ the same ID is deduplicated rather than double-counted — or omit it and
 ```bash
 curl -X POST http://localhost:8080/events \
   -H 'Content-Type: application/json' \
+  -H "X-API-Key: $EVENT_API_KEY" \
   -d '{"event_id":"evt-demo-1-goal-1","match_id":"demo-1","event_type":"goal","team":"Arsenal","player":"Saka","minute":12}'
 ```
 

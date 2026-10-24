@@ -73,11 +73,52 @@ not change the provisioned dashboard or the Prometheus/Loki data sources: those
 remain mounted from the existing repository ConfigMaps/files. Back up
 persistent Grafana data before rotating production credentials.
 
+## Event ingestion authentication
+
+`POST /events` requires `X-API-Key`; `/health` remains public for probes and
+`/metrics` remains available to internal Prometheus. Generate a separate key
+with `openssl rand -hex 32`, store it in a password manager, and set
+`EVENT_API_KEY` in the ignored local `.env`. Both `event-api` and
+`match-simulator` receive that value. Requests are limited to 16 KiB and a
+per-instance token bucket defaults to 20 requests/second with a burst of 40.
+The limiter deliberately does not trust `X-Forwarded-For` and is not a shared
+cluster-wide quota.
+
+Kubernetes expects one externally managed Secret before either workload is
+deployed:
+
+```bash
+read -rsp 'Event API key: ' EVENT_KEY; echo
+printf %s "$EVENT_KEY" | kubectl -n matchsense create secret generic event-api-auth \
+  --from-file=api-key=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
+unset EVENT_KEY
+```
+
+The references are non-optional; a missing Secret fails closed. To rotate,
+create a new strong value, update the external Secret and local `.env`, then
+restart both workloads together during an approved window. In-flight clients
+using the previous value receive 401 because this phase intentionally supports
+one key rather than a grace-period keyring.
+
+Authorized local request:
+
+```bash
+set -a; source .env; set +a
+curl -X POST http://127.0.0.1:8080/events \
+  -H 'Content-Type: application/json' \
+  -H "X-API-Key: $EVENT_API_KEY" \
+  -d '{"match_id":"demo-1","event_type":"shot","team":"Arsenal","minute":12}'
+unset EVENT_API_KEY
+```
+
 ## Remaining risks
 
-- **High:** `event-api` and `query-api` have no authentication. Keep them on
-  trusted development networks; add authenticated ingress/API authorization
-  before exposing them to untrusted clients.
+- **High:** `query-api` remains unauthenticated. Keep it on trusted networks;
+  add authenticated ingress/API authorization before public exposure.
+- **Medium:** Event ingestion uses one shared API key and per-instance rate
+  limiting. It provides service authentication, not user identity, fine-grained
+  authorization, or a cluster-wide quota; enforce TLS and an external gateway
+  before exposure beyond trusted networks.
 - **Medium:** Prometheus remains a Kubernetes NodePort and can disclose labels,
   topology, and operational metrics. Bind it locally in kind today; move it to
   ClusterIP plus authenticated port-forward/ingress in a follow-up.

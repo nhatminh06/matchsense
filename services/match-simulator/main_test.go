@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -318,6 +319,8 @@ func TestHTTPEventSender_ClassifiesResponses(t *testing.T) {
 	}{
 		{"202 accepted", http.StatusAccepted, false, false},
 		{"400 bad request is permanent", http.StatusBadRequest, true, true},
+		{"401 unauthorized is permanent", http.StatusUnauthorized, true, true},
+		{"429 is retryable", http.StatusTooManyRequests, true, false},
 		{"500 is retryable", http.StatusInternalServerError, true, false},
 		{"503 is retryable", http.StatusServiceUnavailable, true, false},
 	}
@@ -347,7 +350,12 @@ func TestHTTPEventSender_ClassifiesResponses(t *testing.T) {
 
 func TestHTTPEventSender_SendsTheEventAsJSON(t *testing.T) {
 	received := make(chan MatchEvent, 1)
+	apiKey := strings.Repeat("test-", 7)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != apiKey {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		var e MatchEvent
 		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
 			w.WriteHeader(http.StatusBadRequest)
@@ -358,7 +366,7 @@ func TestHTTPEventSender_SendsTheEventAsJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	sender := httpEventSender{client: srv.Client(), url: srv.URL}
+	sender := httpEventSender{client: srv.Client(), url: srv.URL, apiKey: apiKey}
 	sent := MatchEvent{EventID: "evt-1", MatchID: "m1", EventType: "goal", Team: "Arsenal", Minute: 12}
 	if err := sender.Send(context.Background(), sent); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -367,6 +375,16 @@ func TestHTTPEventSender_SendsTheEventAsJSON(t *testing.T) {
 	got := <-received
 	if got.EventID != sent.EventID || got.MatchID != sent.MatchID || got.EventType != sent.EventType {
 		t.Fatalf("event was not transmitted faithfully: got %+v, sent %+v", got, sent)
+	}
+}
+
+func TestRequiredAPIKey(t *testing.T) {
+	if _, err := requiredAPIKey(""); err == nil {
+		t.Fatal("missing key must fail configuration")
+	}
+	key := strings.Repeat("test-", 7)
+	if got, err := requiredAPIKey(key); err != nil || got != key {
+		t.Fatalf("valid key rejected: %v", err)
 	}
 }
 

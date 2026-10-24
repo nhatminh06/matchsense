@@ -106,6 +106,7 @@ container). After retraining:
 
 ```bash
 cp ml/models/*.pkl services/ml-predictor/models/
+# Complete the .env setup in local-development.md first.
 docker compose up --build ml-predictor
 ```
 

@@ -23,7 +23,7 @@ Bring up the full stack (Kafka, Redis, all 5 services, observability):
 
 ```bash
 cp .env.example .env
-# Set GRAFANA_ADMIN_PASSWORD in the ignored .env file.
+# Set GRAFANA_ADMIN_PASSWORD and EVENT_API_KEY in the ignored .env file.
 docker compose up --build
 ```
 

@@ -28,6 +28,12 @@ spec:
               value: "kafka:29092"
             - name: OTEL_EXPORTER_OTLP_ENDPOINT
               value: "jaeger:4318"
+            - name: EVENT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: event-api-auth
+                  key: api-key
+                  optional: false
           resources:
             requests:
               memory: "32Mi"

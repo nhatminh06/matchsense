@@ -38,6 +38,7 @@ services:
       - PORT=8080
       - KAFKA_BROKER=kafka:29092
       - OTEL_EXPORTER_OTLP_ENDPOINT=jaeger:4318
+      - EVENT_API_KEY=${EVENT_API_KEY:?set EVENT_API_KEY in .env}
     depends_on:
       kafka:
         condition: service_started
@@ -128,6 +129,7 @@ services:
       - "127.0.0.1:8082:8082"
     environment:
       - EVENT_API_URL=http://event-api:8080
+      - EVENT_API_KEY=${EVENT_API_KEY:?set EVENT_API_KEY in .env}
       - SIMULATOR_MATCH_ID=ars-mci-2026
       - SIMULATOR_HOME_TEAM=Arsenal
       - SIMULATOR_AWAY_TEAM=Manchester City
