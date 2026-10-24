@@ -211,8 +211,16 @@ jobs:
           GRAFANA_ADMIN_PASSWORD: harmless-ci-only-password
         run: |
           docker compose config --quiet
-          docker compose config --format json | \
-            jq -e '[.services[].ports[]? | select(.host_ip != "127.0.0.1")] | length == 0'
+          config=$(docker compose config --format json)
+          jq -e '[.services[].ports[]? | select(.host_ip != "127.0.0.1")] | length == 0' \
+            <<<"$config"
+          for service in event-api event-processor query-api ml-predictor match-simulator; do
+            jq -e --arg service "$service" \
+              '.services[$service].logging.driver == "syslog" and
+               .services[$service].logging.options.tag == $service' <<<"$config"
+          done
+          ! grep -RqiE 'promtail|docker\.sock' \
+            docker-compose.yaml observability gitops/infrastructure/loki
       - name: Require Grafana password
         run: |
           if env -u GRAFANA_ADMIN_PASSWORD docker compose --env-file /dev/null config --quiet 2>/dev/null; then
@@ -236,6 +244,53 @@ jobs:
           if grep -q 'nodePort:' /tmp/grafana.yaml; then exit 1; fi
           if grep -A1 'name: GF_SECURITY_ADMIN_PASSWORD' /tmp/grafana.yaml | grep -q 'value:'; then exit 1; fi
 
+  logging-pipeline:
+    name: Alloy to Loki logging pipeline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GRAFANA_ADMIN_PASSWORD: harmless-ci-only-password
+    steps:
+      - uses: actions/checkout@v7
+      - name: Start Loki and Alloy
+        run: docker compose up -d loki alloy
+      - name: Send and query a real log
+        run: |
+          trap 'docker compose down -v' EXIT
+
+          for attempt in {1..30}; do
+            if curl -fsS http://127.0.0.1:3100/ready >/dev/null && \
+               bash -c 'exec 3<>/dev/tcp/127.0.0.1/1514'; then
+              break
+            fi
+            if [ "$attempt" = 30 ]; then
+              docker compose logs loki alloy
+              exit 1
+            fi
+            sleep 2
+          done
+
+          marker="matchsense-alloy-smoke-${GITHUB_RUN_ID}"
+          docker run --rm \
+            --log-driver=syslog \
+            --log-opt syslog-address=tcp://127.0.0.1:1514 \
+            --log-opt syslog-format=rfc5424micro \
+            --log-opt tag=logging-smoke \
+            alpine:3.24 echo "$marker"
+
+          for attempt in {1..30}; do
+            if curl -fsSG http://127.0.0.1:3100/loki/api/v1/query_range \
+              --data-urlencode 'query={service_name="logging-smoke"}' \
+              | jq -e --arg marker "$marker" \
+                '.data.result[].values[][1] | contains($marker)' >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          docker compose logs loki alloy
+          exit 1
+
   kustomize-build:
     name: Kustomize build (${{ matrix.service }})
     runs-on: ubuntu-latest
@@ -248,6 +303,22 @@ jobs:
       - uses: actions/checkout@v7
       - name: kubectl kustomize
         run: kubectl kustomize gitops/apps/${{ matrix.service }}/overlays/dev > /dev/null
+
+  loki-kustomize:
+    name: Loki and Alloy Kustomize security
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate manifests and collector privileges
+        run: |
+          kubectl kustomize gitops/infrastructure/loki > /tmp/loki.yaml
+          grep -q 'image: grafana/alloy:v1.21.2' /tmp/loki.yaml
+          grep -q 'kind: Role' /tmp/loki.yaml
+          grep -q 'pods/log' /tmp/loki.yaml
+          grep -q 'runAsNonRoot: true' /tmp/loki.yaml
+          grep -q 'readOnlyRootFilesystem: true' /tmp/loki.yaml
+          ! grep -qiE 'promtail|docker\.sock|hostPath:|kind: DaemonSet|kind: ClusterRole' /tmp/loki.yaml
 
   gitleaks:
     name: Secret scan (Gitleaks)

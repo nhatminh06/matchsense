@@ -26,7 +26,13 @@ Compose deliberately fails validation when `GRAFANA_ADMIN_PASSWORD` is absent
 or empty. Published development ports bind to `127.0.0.1`; service-to-service
 traffic still uses the private Compose network and service names.
 
-Bring up a subset (e.g. just the Go services, skipping observability):
+On Linux Docker Engine, application logs are sent to Alloy at the loopback-only
+TCP syslog port `1514` and written to Loki. Docker Desktop users must read the
+[logging compatibility note](observability.md#log-collection) before startup;
+never expose or mount the Docker daemon socket to make collection work.
+
+Bring up the core services (Alloy and Loki start automatically because
+application logging fails closed if the collector is unavailable):
 
 ```bash
 docker compose up --build event-api event-processor query-api match-simulator kafka redis
