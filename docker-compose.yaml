@@ -5,14 +5,14 @@ services:
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
     ports:
-      - "2181:2181"
+      - "127.0.0.1:2181:2181"
 
   kafka:
     image: confluentinc/cp-kafka:7.6.0
     depends_on:
       - zookeeper
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
@@ -25,7 +25,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   # --- Application Services ---
   event-api:
@@ -33,7 +33,7 @@ services:
       context: .
       dockerfile: services/event-api/Dockerfile
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     environment:
       - PORT=8080
       - KAFKA_BROKER=kafka:29092
@@ -46,7 +46,7 @@ services:
       context: .
       dockerfile: services/event-processor/Dockerfile
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
     environment:
       - KAFKA_BROKER=kafka:29092
       - REDIS_URL=redis:6379
@@ -61,7 +61,7 @@ services:
       context: .
       dockerfile: services/query-api/Dockerfile
     ports:
-      - "8083:8083"
+      - "127.0.0.1:8083:8083"
     environment:
       - PORT=8083
       - REDIS_URL=redis:6379
@@ -72,7 +72,7 @@ services:
   ml-predictor:
     build: ./services/ml-predictor
     ports:
-      - "8084:8084"
+      - "127.0.0.1:8084:8084"
     environment:
       - KAFKA_BROKER=kafka:29092
       - REDIS_URL=redis:6379
@@ -87,7 +87,7 @@ services:
       context: .
       dockerfile: services/match-simulator/Dockerfile
     ports:
-      - "8082:8082"
+      - "127.0.0.1:8082:8082"
     environment:
       - EVENT_API_URL=http://event-api:8080
       - SIMULATOR_MATCH_ID=ars-mci-2026
@@ -108,7 +108,7 @@ services:
   prometheus:
     image: prom/prometheus:v2.53.0
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     depends_on:
@@ -119,10 +119,10 @@ services:
   grafana:
     image: grafana/grafana:11.1.0
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-matchsense}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards
@@ -133,7 +133,7 @@ services:
   loki:
     image: grafana/loki:3.1.0
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
     volumes:
       - ./observability/loki/loki-config.yml:/etc/loki/local-config.yaml
     command: -config.file=/etc/loki/local-config.yaml
@@ -150,7 +150,7 @@ services:
   jaeger:
     image: jaegertracing/all-in-one:1.58
     ports:
-      - "16686:16686"
-      - "4318:4318"
+      - "127.0.0.1:16686:16686"
+      - "127.0.0.1:4318:4318"
     environment:
       - COLLECTOR_OTLP_ENABLED=true

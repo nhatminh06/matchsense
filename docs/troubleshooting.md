@@ -21,9 +21,17 @@ their Dockerfiles `COPY services/common`. Make sure you're running
 `docker-compose.yaml`) rather than `docker build` directly inside a service
 folder.
 
-**Grafana admin password.** Defaults to `matchsense` locally. Override with
-`GRAFANA_ADMIN_PASSWORD` — required for anything beyond pure local
-development.
+**Compose says `GRAFANA_ADMIN_PASSWORD` is required.** Copy `.env.example` to
+the ignored `.env`, generate a password with `openssl rand -base64 32`, store
+it in a password manager, and assign it to `GRAFANA_ADMIN_PASSWORD`. Empty
+values are intentionally rejected.
+
+**A changed Grafana password is not accepted.** Grafana uses
+`GF_SECURITY_ADMIN_PASSWORD` only when initializing a new database; changing
+the environment or Secret does not reset an existing database credential. Use
+the CLI rotation procedure in [security.md](security.md#grafana-credentials)
+and update the external Secret to match. This preserves provisioned dashboards
+and Prometheus/Loki data sources.
 
 ## CI
 
@@ -44,3 +52,14 @@ base-image bumps.
 policy report first — the most common cause is an unsigned image (should
 never happen via the normal CI pipeline, since every pushed image is
 signed) or a missing resource-limits block.
+
+**Grafana is pending with a missing `grafana-admin` Secret.** This is the
+intended fail-closed state. Create the Secret outside Git using the procedure
+in [security.md](security.md#grafana-credentials), verify the
+`admin-password` key exists, and let Kubernetes retry. Do not weaken the
+reference, commit a Secret manifest, or add a fallback password. Once running,
+connect with:
+
+```bash
+kubectl -n matchsense port-forward svc/grafana 3000:3000
+```

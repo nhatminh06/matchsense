@@ -9,6 +9,87 @@ Gitleaks runs on every push and pull request (`ci.yml`'s `gitleaks` job,
 full git history via `fetch-depth: 0`), so a committed secret fails CI
 before it can be reviewed or merged.
 
+## Grafana credentials
+
+Grafana has no deployable default password. Generate a unique value with
+`openssl rand -base64 32`, store it in a password manager, and never commit it.
+For Docker Compose, copy `.env.example` to the Git-ignored `.env`, then set
+`GRAFANA_ADMIN_PASSWORD` there. Compose fails before startup if it is missing
+or empty, and all published development ports listen only on `127.0.0.1`.
+
+Kubernetes expects a Secret that is managed outside Git. Create it before the
+Grafana ArgoCD Application synchronizes:
+
+```bash
+read -rsp 'Grafana admin password: ' GRAFANA_PASSWORD; echo
+printf %s "$GRAFANA_PASSWORD" | kubectl -n matchsense create secret generic grafana-admin \
+  --from-file=admin-password=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
+unset GRAFANA_PASSWORD
+```
+
+The Deployment's non-optional Secret reference fails closed: if the Secret or
+`admin-password` key is absent, the Grafana container does not start. Recover
+by creating the Secret with the command above and allowing ArgoCD/Kubernetes to
+retry; do not add a plaintext Secret manifest or restore a default password.
+Access Grafana without exposing a NodePort:
+
+```bash
+kubectl -n matchsense port-forward svc/grafana 3000:3000
+```
+
+`GF_SECURITY_ADMIN_PASSWORD` initializes a new Grafana database; changing the
+environment variable does not overwrite the admin credential already stored
+in an existing database. To rotate an existing installation, first reset the
+database credential using Grafana's CLI, then update the external Secret to the
+same value and restart Grafana during an approved maintenance window. Supply
+the password interactively so it is not stored in Git or shell history:
+
+For Docker Compose:
+
+```bash
+read -rsp 'New Grafana admin password: ' GRAFANA_PASSWORD; echo
+printf '%s\n' "$GRAFANA_PASSWORD" | docker compose exec -T grafana \
+  sh -c 'read -r password; grafana cli admin reset-admin-password "$password"'
+# Update GRAFANA_ADMIN_PASSWORD in the ignored .env to the same value.
+unset GRAFANA_PASSWORD
+docker compose up -d --force-recreate grafana
+```
+
+For Kubernetes:
+
+```bash
+read -rsp 'New Grafana admin password: ' GRAFANA_PASSWORD; echo
+printf '%s\n' "$GRAFANA_PASSWORD" | kubectl -n matchsense exec -i deployment/grafana -- \
+  sh -c 'read -r password; grafana cli admin reset-admin-password "$password"'
+printf %s "$GRAFANA_PASSWORD" | kubectl -n matchsense create secret generic grafana-admin \
+  --from-file=admin-password=/dev/stdin --dry-run=client -o yaml | kubectl apply -f -
+unset GRAFANA_PASSWORD
+kubectl -n matchsense rollout restart deployment/grafana
+```
+
+The CLI reset, Secret update, and rollout commands modify a running cluster and
+must be run manually after approval. Password rotation and Secret creation do
+not change the provisioned dashboard or the Prometheus/Loki data sources: those
+remain mounted from the existing repository ConfigMaps/files. Back up
+persistent Grafana data before rotating production credentials.
+
+## Remaining risks
+
+- **High:** `event-api` and `query-api` have no authentication. Keep them on
+  trusted development networks; add authenticated ingress/API authorization
+  before exposing them to untrusted clients.
+- **High:** Compose Promtail mounts the Docker socket. The `:ro` bind does not
+  make Docker API methods read-only, so compromise can become host-level
+  control. Replace Docker discovery with a least-privilege log driver/collector
+  before production use.
+- **Medium:** Prometheus remains a Kubernetes NodePort and can disclose labels,
+  topology, and operational metrics. Bind it locally in kind today; move it to
+  ClusterIP plus authenticated port-forward/ingress in a follow-up.
+- **Medium:** There are no application NetworkPolicies, so compromised pods can
+  make broad east-west connections. Add default-deny ingress/egress and narrow
+  service allowances after mapping required Kafka, Redis, DNS, and telemetry
+  flows.
+
 ## Image scanning
 
 Every service image is scanned with Trivy before being pushed, blocking on

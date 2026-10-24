@@ -22,6 +22,8 @@ cd matchsense
 Bring up the full stack (Kafka, Redis, all 5 services, observability):
 
 ```bash
+cp .env.example .env
+# Set GRAFANA_ADMIN_PASSWORD in the ignored .env file.
 docker compose up --build
 ```
 
@@ -29,7 +31,7 @@ Then:
 
 - `curl http://localhost:8083/matches` — list active matches
 - `curl http://localhost:8083/matches/ars-mci-2026` — match stats
-- Grafana: http://localhost:3000 (`admin` / `matchsense` locally, override with `GRAFANA_ADMIN_PASSWORD`)
+- Grafana: http://localhost:3000 (`admin` / the `GRAFANA_ADMIN_PASSWORD` value from `.env`)
 - Prometheus: http://localhost:9090
 - Jaeger UI: http://localhost:16686
 

@@ -207,7 +207,34 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Validate docker-compose.yaml
-        run: docker compose config --quiet
+        env:
+          GRAFANA_ADMIN_PASSWORD: harmless-ci-only-password
+        run: |
+          docker compose config --quiet
+          docker compose config --format json | \
+            jq -e '[.services[].ports[]? | select(.host_ip != "127.0.0.1")] | length == 0'
+      - name: Require Grafana password
+        run: |
+          if env -u GRAFANA_ADMIN_PASSWORD docker compose --env-file /dev/null config --quiet 2>/dev/null; then
+            echo 'docker compose config unexpectedly accepted a missing GRAFANA_ADMIN_PASSWORD' >&2
+            exit 1
+          fi
+
+  grafana-kustomize:
+    name: Grafana security configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate Grafana Kustomize and security settings
+        run: |
+          kubectl kustomize gitops/infrastructure/grafana > /tmp/grafana.yaml
+          grep -q 'type: ClusterIP' /tmp/grafana.yaml
+          grep -q 'name: grafana-admin' /tmp/grafana.yaml
+          grep -q 'key: admin-password' /tmp/grafana.yaml
+          grep -q 'optional: false' /tmp/grafana.yaml
+          if grep -q 'nodePort:' /tmp/grafana.yaml; then exit 1; fi
+          if grep -A1 'name: GF_SECURITY_ADMIN_PASSWORD' /tmp/grafana.yaml | grep -q 'value:'; then exit 1; fi
 
   kustomize-build:
     name: Kustomize build (${{ matrix.service }})
